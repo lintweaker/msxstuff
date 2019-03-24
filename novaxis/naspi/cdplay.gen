@@ -1,0 +1,1649 @@
+; CDPLAY.GEN - AUDIO-CD PLAYER for NOVAXIS with NASPI
+; (c) 1995 KMcs
+; Written by Jurgen Kramer
+; v0.01 - 14/11/95 -
+; v0.02 - 15/11/95 -
+; v0.03 - Buffer for Sense-data replaced to $SECBUF because of unpredictible
+; results
+; v0.05 - 16/11/95 -
+; v0.10 
+; v0.20
+; v0.30 - 17/11/95 - CDPrevious, CDPlay and CDNext are working 
+; Playing data tracks will cause and Unexptected SCSI ..etc. failure
+; v0.40 - Pause is working
+; v0.50 - A briljant stop function added, Data tracks cannot be played
+; v0.60 - 18/11/95 - Fast Forward added
+; v0.70 - 19/11/95 - Fast Reverse added
+; v0.71 - 22/11/95 - Special 'Austria' version only works with v1.59.37
+; v0.72 - Still special 'Austria' version, just found out how to Eject the CD
+; just use START/STOP UNIT (bit 1 = LoEj) Load Eject.
+; - 31/08/96 - Updated CurRev to 64h, still because of Austria version, which
+; was never showed. 
+; - 19/09/96 - Updated CurRec to 56h, maybe showing at Zandvoort '96 although
+; we do not take a CD-ROM player with us
+; - 19/06/96 - Updated CurRec to 59h, released to A. Minaard for test purpose
+
+CurVer:	equ	7001h		; Current NOVAXIS version # 1.70
+CurRev:	equ	31h
+
+SCSIROM	equ	07f80h
+NOVAROM	equ	07ff0h
+NOVAVER	equ	07ff5h
+NOVAREV	equ	07ff9h
+
+StrtStpUn	equ	07fb0h
+Inquiry		equ	07f92h
+ExeNASPI	equ	07fe9h
+GetNWA		equ	07fech
+
+ENASLT	equ	24h
+CALSLT	equ	01ch
+CHPUT	equ	0a2h
+POSIT	equ	0c6h
+KILBUF	equ	0156h
+
+EXPSLT	equ	0fcc1h
+SLTATR	equ	0fcc9h
+RAMAD1	equ	0f342h
+$SECBUF	equ	0f34dh
+
+BDOS	equ	05h
+
+cr	equ	0dh
+lf	equ	0ah
+eol	equ	0
+
+
+ID	equ	0ach		; Change to your ID
+VERHI	equ	00h		; High part of version (0-9)
+VERLO	equ	72h		; Low part of version
+
+	org	0100h
+
+	jp	begin
+
+	defb	'NOVAXIS'
+	defb	ID		; ID for CDPLAY
+	defb	VERHI,VERLO	; CDPLAY version 0.72 
+	defb	'EUR'		; Landcode: Europe
+	defb	01h,69h		; Works with NOVAXIS version >= 1.56.56
+	defb	00h,00h		; Needs NUTIL v0.00
+	defb	00h,33h		; Needs NASPI v0.33
+	defw	0,0,0,0		; Reserved
+	defw	0,0		; Reserved
+
+begin:	ld	ix,SCSIROM	; Check for SCSI ROM
+	ld	iy,SCSI_ID
+	ld	hl,data
+	call	SrchROM
+	ld	hl,ErrNoSCSI
+	jp	z,Error
+
+	ld	ix,NOVAROM		; Check for NOVAXIS ROM
+	ld	iy,NOVA_ID
+	ld	hl,data
+	call	SrchROM
+	ld	hl,ErrNoNOVA
+	jp	z,Error
+
+	ld	a,(data+1)		; Check NOVAXIS version #
+	ld	de,CurVer
+	call	ChkVer
+	ld	(version),hl		; Save NOVAXIS version #
+	ld	hl,ErrWrngVr
+	jp	c,Error
+
+	ld	ix,GetNWA
+	call	NOVAXIS
+	ld	hl,ErrNoNASPI
+	jp	c,Error
+
+	ld	(NASPI),ix
+
+	ld	hl,InitTxt
+	call	Print
+
+	ld	a,(CDROMID)
+	ld	hl,($SECBUF)
+	ld	ix,Inquiry
+	push	hl
+	call	NOVAXIS
+	pop	ix
+	inc	d
+	dec	d
+	jr	z,InqOk
+	ld	hl,ErrTrg
+	cp	85h
+	jp	nz,Error
+	ld	a,d
+	cp	2			; Check Condition ?
+	jp	nz,Error
+
+InqOk:	ld	a,(ix+00)
+	and	00011111b
+	cp	5			; CD-ROM ?
+	ld	hl,ErrCDROM
+	jp	nz,Error
+
+Again:	call	ChkCDAU		; Is this CD-ROM capable ?
+	jr	nc,Contin
+
+	ld	hl,ErrTrg
+	cp	0c0h
+	jp	nz,Error
+
+	call	RetrSns
+	jp	c,Error
+
+	ld	a,(SnsKey)	; Get Sense-Key
+	cp	2h		; Not Ready ?
+	jr	z,ChkUnit
+	cp	6h		; Unit Attention ?
+	jr	z,ChkUnit
+	cp	5h		; Illegal request ?
+	jp	nz,Error
+	ld	hl,ErrNotAU	
+	jp	Error
+
+ChkUnit:
+	ld	a,(SnsCod)	; Get Sense-code
+	cp	28h
+	jr	z,Again
+	cp	3ah
+	ld	hl,ErrMedium
+	jp	z,Error
+	call	PrSense
+	jp	Error
+
+; ** Main
+
+Contin:	call	DeterTr		; How many tracks are on the CD
+	jp	c,EXError
+
+	ld	hl,FrstTxt
+	call	PrintXY
+	ld	a,(FirstTr)
+	call	PrintBCD
+	ld	hl,LastTxt
+	call	PrintXY
+	ld	a,(LastTr)
+	call	PrintBCD
+
+	call	IniCD
+	jp	c,EXError
+
+	ld	hl,KeysTxt
+	call	PrintXY
+
+; *** Player part
+
+WaitKey:
+	di
+	call	ScanKeys	; Scan keyboard
+	ei
+	jr	c,NoKey
+	cp	255		; ESC pressed ?
+	jp	z,Quit
+	
+	push	af
+	call	KillBuf
+	pop	af
+
+	ld	d,0
+	ld	e,a
+	ld	hl,FncDat
+	add	hl,de
+	ld	ix,Sneek
+	ld	a,(hl)		; Get Low byte	
+	ld	(ix+01h),a
+	inc	hl
+	ld	a,(hl)
+	ld	(ix+02h),a
+Sneek:	call	0000h
+	jp	c,EXError
+NoKey:
+	call	PrCurPos
+	jp	c,EXError
+	halt
+	halt
+	halt
+	halt
+;	halt
+;	halt
+
+	jr	WaitKey	
+
+; *** End player part
+
+; ** End main
+	
+; CDEject / Load
+
+CDEject:
+	ld	ix,StrtStpUn
+	ld	b,2		; Eject Medium
+	ld	a,(CDROMID)
+	call	NOVAXIS
+	inc	d
+	dec	d		; Status GOOD ?
+	scf
+	ret	nz
+	ccf
+	ret
+
+; CDForward - Fast Forward CD
+
+CDForward:
+	ld	a,(AudStt)
+	and	a
+	ret	z
+	cp	11h		; Playing ?
+	ret	nz
+
+	ld	hl,TotMSF
+	push	hl
+	ld	de,PLAYMSF+6
+	ld	bc,3
+	ldir
+
+	pop	hl
+
+	ld	a,255
+	ld	(Action),a
+
+	ld	iy,PLAYMSF
+	ld	ix,Buffer
+	ld	c,1
+	ld	b,(ix+09)	; Get M field (abs.)
+	ld	a,(ix+10)	; Get S field (abs.)
+	add	a,3		; Skip 3 seconds
+	cp	60		; Exceeded max. seconds # ?
+	jr	c,CDF_i
+	sub	60
+	dec	c
+CDF_i:	ld	(iy+04),a	; Starting S
+	inc	c
+	dec	c
+
+	ld	c,(hl)		; Get max. M
+
+	jr	nz,SkipM
+
+	inc	b	
+	ld	a,b
+	cp	c		; Exceeded max. Minute ?
+	jr	c,SkipM
+	ld	b,c
+SkipM:	ld	(iy+03),b	; Set start Minute
+
+	ld	a,b
+	cp	c
+	jr	nz,NtMaxCDF
+	inc	hl
+	ld	a,(hl)		; Get max. sec.
+	ld	(iy+04),a
+
+NtMaxCDF:
+	ld	a,1
+	ld	(iy+05),a	; Set Start F
+
+	ld	b,1
+	ld	de,0
+	ld	a,(CDROMID)
+	call	DoNASPI
+	ld	a,(ix+24)	; Get NASPI Status
+	and	a		; Ok ?
+	ret	z
+	scf
+	ret
+
+; CDNext - Next track CD
+
+CDNext:	ld	a,(AudStt)
+	and	a		; Not valid ?
+	ret	z
+	
+	cp	12h		; Paused ?
+	ret	z
+	cp	14h		; Error ?
+	ret	z
+	ld	c,1
+	cp	13h		; Stopped ?
+	jr	z,OnlyInc
+	cp	15h
+	jr	z,OnlyInc
+	dec	c
+OnlyInc:
+	ld	a,(CurTr)
+	ld	b,a
+	ld	a,(LastTr)
+	sub	b
+	ret	z
+	ld	a,b
+	inc	a
+	ld	(CurTr),a
+	call	ChkTrack	; Audio Track ?
+	jr	c,OnlyInc
+	inc	c
+	dec	c		; Play next track ?
+	ret	nz		; No
+
+Playit:	ld	ix,PLAYATI
+	ld	(ix+4),a	; Set Starting Track
+	ld	a,(LastTr)
+	ld	(ix+7),a	; Set Ending Track
+	call	PlayTrCD
+	ret
+
+; CDPlay - Play track(s) CD
+
+CDPlay:	ld	a,255
+	ld	(Action),a	; Indicate command issued
+
+	ld	a,(AudStt)
+	and	a
+	ret	z
+	cp	11h		; Playing ?
+	ret	z
+	cp	14h		; Error ?
+	ret	z
+	cp	12h		; Paused ?
+	jp	z,CDPause
+
+	ld	a,(CurTr)	; Get current Track
+	call	ChkTrack	; Audio Track ?
+	jr	nc,Playit
+	ccf
+	ret
+
+; CDReverse - Fast Reverse CD
+
+CDReverse:
+	ld	a,(AudStt)
+	and	a
+	ret	z
+	cp	11h		; Playing ?
+	ret	nz
+
+	ld	hl,TotMSF
+	ld	de,PLAYMSF+6
+	ld	bc,3
+	ldir
+
+	ld	a,255
+	ld	(Action),a
+
+
+	ld	iy,PLAYMSF
+	ld	ix,Buffer
+	ld	c,1
+	ld	b,(ix+09)	; Get M field (abs.)
+	ld	a,(ix+10)	; Get S field (abs.)
+	sub	3		; Skip 3 seconds
+	jr	z,CDR_i
+	jr	nc,CDR_i
+	add	a,60
+	dec	c
+CDR_i:	ld	(iy+04),a	; Starting S
+	inc	c
+	dec	c
+	jr	nz,SkipM1
+
+	ld	hl,MinMSF
+	ld	c,(hl)		; Get min. M
+	ld	a,b
+	dec	a
+	cp	c		; Exceeded min. Minute ?
+	jr	z,ChkCDR
+	jr	nc,SkipM1
+ChkCDR:	ld	b,c
+	ld	a,(iy+04)
+	inc	hl
+	ld	c,(hl)		; Get min. sec.	
+	cp	c
+	jr	nc,SkipM1
+	ld	(iy+04),c
+
+	inc	hl
+	ld	a,(hl)		; Get min. frame
+	ld	(iy+05),a	; Set Start F
+
+SkipM1:	ld	(iy+03),b	; Set start Minute
+
+;	ld	a,1
+;	ld	(iy+05),a	; Set Start F
+
+	ld	b,1
+	ld	de,0
+	ld	a,(CDROMID)
+	call	DoNASPI
+	ld	a,(ix+24)	; Get NASPI Status
+	and	a		; Ok ?
+	ret	z
+	scf
+	ret
+
+; CDStop - Stop CD
+
+CDStop:
+	ld	a,(TotTr)
+	ld	b,a
+	ld	a,(FirstTr)
+ChkTr:	call	ChkTrack	; Is this Track and audio track ?
+	jr	nc,AudTr
+	inc	a
+	djnz	ChkTr
+	and	a
+	ret	
+
+AudTr:	push	af
+	ld	a,255
+	ld	(Action),a
+	pop	af
+
+	ld	de,5
+	add	ix,de		; IX points to abs. CD-ROM address (MSF)
+	push	ix
+	pop	hl
+	push	hl
+	ld	de,PLAYMSF+3
+	ld	bc,3
+	ldir			; Move MSF to Starting MSF
+	pop	hl
+	ld	bc,3
+	ldir			; Move MSF to Ending MSF
+	
+	ld	b,1
+	ld	de,0
+	ld	hl,Buffer
+	ld	iy,PLAYMSF
+	ld	a,(CDROMID)
+	call	DoNASPI
+	ld	a,(ix+24)	; Get NASPI Status
+	and	a		; Ok ?
+	ret	z
+	scf
+	ret
+
+; CDPause - Pause CD
+
+CDPause:
+	ld	a,(AudStt)
+	cp	11h		; Playing ?
+	jr	z,TogglePause
+	cp	12h		; Paused ?
+	jr	z,TogglePause
+	ret
+TogglePause:
+	push	af
+	ld	a,255
+	ld	(Action),a
+	pop	af
+
+	xor	1
+	and	1
+		
+	ld	b,1
+	ld	de,0
+	ld	hl,Buffer
+	ld	iy,PAUSE
+	ld	(iy+8),a
+	ld	a,(CDROMID)
+	call	DoNASPI
+	ld	a,(ix+24)	; Get NASPI Status
+	and	a		; Ok ?
+	ret	z
+	scf
+	ret
+
+; CDPrevious - Previous track CD
+
+CDPrevious:
+
+	ld	a,(AudStt)
+	and	a		; Not valid ?
+	ret	z
+	
+	cp	12h		; Paused ?
+	ret	z
+	cp	14h		; Error ?
+	ret	z
+	ld	c,1
+	cp	13h		; Stopped ?
+	jr	z,OnlyDec
+	cp	15h
+	jr	z,OnlyDec
+	dec	c
+OnlyDec:
+	ld	a,(FirstTr)
+	ld	b,a
+	ld	a,(CurTr)
+	cp	b
+	ret	z
+	dec	a
+	ld	(CurTr),a
+	call	ChkTrack	; Audio Track ?
+	jr	c,OnlyDec
+
+	inc	c
+	dec	c		; Play next track ?
+
+	ret	nz		; No
+
+	jp	Playit
+
+; ScanKeys - Scan Keyboard
+; Input	: -
+; Ouput	: Cy=0 a valid key was pressed A = Keycode, Cy = 1 no valid key pressed
+; Modify: F,HL
+
+; Valid keys are: E - (E)ject = 00h, F - Fast (F)orward, 02h
+;		  N - (N)ext = 04h, P - (P)lay = 06h, R - Fast (R)everse = 08h
+;		  S - (S)top = 0ah, u - Pa(u)se = 0ch, v - Pre(v)ious = 0eh
+;		  ESC = ffh
+
+ScanKeys:
+	ld	hl,0fbe5h+3
+	xor	a
+	bit	2,(hl)		; E ?
+	ret	z
+	add	a,2
+	bit	3,(hl)		; F ?
+	ret	z
+	add	a,a
+	inc	hl
+	bit	3,(hl)		; N ?
+	ret	z
+	add	a,2
+	bit	5,(hl)		; P ?
+	ret	z
+	add	a,2
+	bit	7,(hl)		; R ?
+	ret	z
+	inc	hl
+	add	a,2
+	bit	0,(hl)		; S ?
+	ret	z
+	add	a,2
+	bit	2,(hl)		; U ?
+	ret	z
+	add	a,2
+	bit	3,(hl)		; V ?
+	ret	z
+	inc	hl
+	inc	hl
+	ld	a,255
+	bit	2,(hl)		; ESC ?
+	ret	z
+	inc	hl
+; *N* 28/01/97
+	ld	a,2
+	bit	7,(hl)		; Arrow right?
+	ret	z
+	add	a,a
+	bit	5,(hl)		; Arrow up?
+	ret	z
+	add	a,a
+	bit	4,(hl)		; Arrow left?
+	ret	z
+	add	a,6
+	bit	6,(hl)		; Arrow down?
+	ret	z	
+	scf
+	ret
+
+Quit:	call	KillBuf
+	ld	c,0
+	jp	BDOS
+
+; IniCD - Init CD (Read TOC and display tot. tracks and time + status)
+; Input	: -
+; Output: Cy = 1 if error occurred
+; Modify:
+
+IniCD:	call	RdTOC
+	ret	c
+
+	ld	hl,CurTrTxt
+	call	PrintXY
+
+	ld	a,(CurTr)
+	call	PrintBCD
+
+	ld	hl,CurTiTxt
+	call	PrintXY
+
+	call	ClrMSF
+
+	ld	hl,ElapsedTxt
+	call	PrintXY
+
+	call	ClrMSF
+
+	ld	hl,TotTrkTxt
+	call	PrintXY
+
+	ld	a,(TotTr)
+	call	PrintBCD
+	
+	ld	a,' '
+	call	CharPut
+	ld	a,'('
+	call	CharPut
+
+	ld	ix,TotMSF
+
+	ld	a,(ix+00h)	; Get total Minutes
+	call	PrintBCD
+	ld	a,':'
+	call	CharPut
+	ld	a,(ix+01h)	; Get total Seconds
+	call	PrintBCD
+	ld	a,'.'
+	call	CharPut
+	ld	a,(ix+02h)	; Get total Frames
+	call	PrintBCD
+
+	ld	a,')'
+	call	CharPut
+
+PrAudStt:
+	ld	hl,StatusTxt
+	call	PrintXY
+
+	call	GetStt
+	ret	c
+
+	ld	ix,Buffer
+	ld	a,(ix+01h)	; Get Audio status
+	ld	(AudStt),a
+	and	a
+	jr	nz,NoFix
+	ld	a,14h
+	jr	SttOk
+
+NoFix:	cp	15h
+	jr	nz,SttOk
+	ld	a,13h
+SttOk:	ld	hl,AudDat
+	sub	11h
+	jr	z,AudOk
+	ld	de,2
+	ld	b,a
+MakeAud:
+	add	hl,de
+	djnz	MakeAud
+AudOk:	ld	a,(hl)
+	inc	hl
+	ld	h,(hl)
+	ld	l,a
+	call	Print
+	and	a
+	ret
+
+; ClrMSF - Clear M:S:F (Print 00:00.00)
+
+ClrMSF:	xor	a		; Minutes
+	call	PrintBCD
+	ld	a,':'
+	call	CharPut
+	xor	a		; Seconds
+	call	PrintBCD
+	ld	a,'.'
+	call	CharPut
+	xor	a		; Get total Frames
+	jp	PrintBCD
+
+; ChkCDAU - Check if CD-ROM supports audio play operations
+; Input	: -
+; Output: A = NASPI Status, 00h = Ok then Cy=0
+; Modify: AF,BC,DE,HL,IY
+
+ChkCDAU:
+	ld	a,(CDROMID)
+	ld	b,1
+	ld	de,0
+	ld	hl,Buffer
+	ld	iy,PLAY10
+	call	DoNASPI
+	ld	a,(ix+24)	; Get NASPI Status
+	and	a		; Ok ?
+	ret	z
+	scf
+	ret
+
+; RdTOC - Read Table Of Contents and Calc. Total play time
+; Input	: -
+; Output: A = NASPI Status, 00h = Ok then Cy=0, IX = SRB address
+; Modify: AF,BC,DE,HL,IY
+
+RdTOC:	ld	a,(CDROMID)
+	ld	b,1
+	ld	de,(TOCSize)
+	ld	iy,READTOC
+	ld	(iy+7),e
+	ld	(iy+8),d	; Set Allocation Length
+	ld	hl,TOCBuf
+	call	DoNASPI
+	ld	a,(ix+24)	; Get NASPI Status
+	and	a		; Ok ?
+	scf
+	ret	nz
+
+	push	ix
+
+	ld	ix,TOCBuf+4
+
+; Start Time
+
+	ld	iy,MinMSF
+
+	ld	a,(ix+7)	; Get F field
+	ld	c,(ix+6)	; Get S   "
+	ld	d,(ix+5)	; Get M   "
+
+	ld	(iy+00h),d	; Store start Minute
+	ld	(iy+01h),c	;   "     "   Second
+	ld	(iy+02h),a	; Store start Frame
+
+; Total Time
+
+	ld	de,8
+	ld	a,(TotTr)
+	ld	b,a
+DoMSF:	add	ix,de
+	djnz	DoMSF
+
+	ld	iy,TotMSF
+
+	ld	a,(ix+7)	; Get F field
+	ld	c,(ix+6)	; Get S   "
+	ld	d,(ix+5)	; Get M   "
+
+	ld	(iy+00h),d	; Store start Minute
+	ld	(iy+01h),c	;   "     "   Second
+	ld	(iy+02h),a	; Store start Frame
+
+	pop	ix
+	and	a
+	ret
+
+; DeterTr - Determine # of Tracks on CD and more
+; Input	: -
+; Output: A = NASPI Status, 00h = Ok then Cy=0
+; Modify: AF,BC,DE,HL,IX,IY
+
+DeterTr:
+	ld	a,(CDROMID)
+	ld	b,1
+	ld	de,12
+	ld	iy,READTOC
+	ld	(iy+7),e
+	ld	(iy+8),d	; Set Allocation Length	
+	ld	hl,Buffer
+	call	DoNASPI
+	ld	a,(ix+24)	; Get NASPI Status
+	and	a		; Ok ?
+	scf
+	ret	nz
+
+	push	af
+	ld	ix,Buffer
+	ld	a,(ix+2)	; Get First Track Number
+	ld	(CurTr),a
+	ld	(FirstTr),a
+	dec	a
+	ld	b,a
+	ld	a,(ix+3)	; Get Last Track Number
+	ld	(LastTr),a
+	sub	b		; Calc. number of tracks
+	ld	(TotTr),a
+
+	ld	e,a
+	ld	d,0
+	and	a
+	
+	sla	e		; *2
+	rl	d
+	sla	e		; *4
+	rl	d
+	sla	e		; *8
+	rl	d
+
+	ld	hl,4		; Header size
+	add	hl,de		; Total TOC size
+	ld	(TOCSize),hl
+
+	pop	af
+	and	a
+	ret
+
+; PlaySTr - Play Single Track
+; Input	: A = Track no.
+; Output: A = NASPI Status, 00h = Ok then Cy=0
+; Modify: AF,BC,DE,HL,IX,IY
+
+PlaySTr:
+	ld	b,1
+	ld	de,0
+	ld	iy,PLAYATI
+	ld	(iy+4),a	; Start Track
+	ld	(iy+7),a	; Ending Track
+	
+PlayCD:	ld	a,(CDROMID)
+	call	DoNASPI
+	ld	a,(ix+24)	; Get NASPI Status
+	and	a		; Ok ?
+	ret	z
+	scf
+	ret
+
+; PlayTrCD - Play CD and start with given Track
+; Input	: A = Track no.
+; Output: A = NASPI Status, 00h = Ok then Cy=0
+; Modify: AF,BC,DE,HL,IX,IY
+
+PlayTrCD:
+	ld	b,1
+	ld	de,0
+	ld	iy,PLAYATI
+	jr	PlayCD
+
+; GetStt - Get CD Status
+; Input	: -
+; Output: A = NASPI Status, 00h = Ok then Cy=0
+; Modify: AF,BC,DE,HL,IY
+
+GetStt:	ld	b,1
+	ld	de,16
+	ld	hl,Buffer
+	ld	iy,READSUB
+	ld	a,1		; CD-ROM Current Position
+	ld	(iy+03h),a	; Sub-channel Data Format
+	ld	(iy+07h),d
+	ld	(iy+08h),e	; Allocation Length
+	ld	a,(CDROMID)
+	call	DoNASPI
+
+	ld	a,(ix+24)	; Get NASPI Status
+	and	a		; Ok ?
+	ret	z
+	scf
+	ret
+
+; PrCurPos - Print CD-ROM Current Position Data
+; Input	: -
+; Output: -
+; Modify: AF,HL,IX
+
+PrCurPos:
+	ld	a,(Action)
+	and	a		; Command executed ?
+	jr	z,NoAction	; No
+	xor	a
+	ld	(Action),a
+	jr	PrPos
+
+NoAction:
+	ld	a,(AudStt)
+	and	a	
+	ret	z
+
+	cp	12h		; Paused ?
+	ret	z
+
+	cp	11h		; Playing ?
+	jr	z,PrPos
+
+	cp	15h		; No current audio status ?
+	jr	z,PrPos2
+	
+	ld	a,1
+	ld	(CurTr),a
+	ld	(CurIn),a
+
+PrPos2:	ld	hl,CurTrTxt
+	call	PrintXY
+	ld	a,(CurTr)
+	jp	PrintBCD
+	
+PrPos:	call	PrAudStt
+	call	c,ChkAudErr
+	ret	c
+	ld	ix,Buffer
+
+	ld	hl,CurTiTxt
+	call	PrintXY
+
+	ld	a,(ix+13)	; Get Minutes (rel.)
+	call	PrintBCD
+	ld	a,':'
+	call	CharPut
+	ld	a,(ix+14)	; Get Seconds (rel.)
+	call	PrintBCD
+	ld	a,'.'
+	call	CharPut
+	ld	a,(ix+15)	; Get Frames (rel.)
+	call	PrintBCD
+
+	ld	hl,ElapsedTxt
+	call	PrintXY
+
+	ld	a,(ix+09)	; Get Minutes (abs.)
+	call	PrintBCD
+	ld	a,':'
+	call	CharPut
+	ld	a,(ix+10)	; Get Seconds (abs.)
+	call	PrintBCD
+	ld	a,'.'
+	call	CharPut
+	ld	a,(ix+11)	; Get Frames (abs.)
+	call	PrintBCD
+
+	ld	a,(ix+6)	; Get Track Number
+	ld	(CurTr),a	; Store
+	ld	a,(ix+7)	; Get Index number
+	ld	(CurIn),a
+
+	jr	PrPos2
+
+; ChkTrack - Check if requested track is an Audio track
+; Input	: A = Track #
+; Output: Cy = 1 Track is Data track, Cy = 0 Track is Audio track
+; Modify: -
+
+ChkTrack:
+	ld	ix,TOCBuf+4-8
+	push	af
+	push	bc
+	push	de
+	ld	de,8		; TOC Track Descriptor size
+	ld	b,a
+SrchTOC:
+	add	ix,de
+	djnz	SrchTOC
+	pop	de
+	pop	bc
+	pop	af
+	bit	2,(ix+1)	; Audio Track ?
+	scf
+	ret	nz		; No
+	ccf
+	ret
+
+; DoNASPI - Fill SRB and execute NASPI
+; Input	: A = SCSI ID, B = NASPI config. byte, DE = data length, HL = data area
+;	  IY = Pointer to CDB
+; Output: IX = SRB address
+; Modify: AF,BC,DE,HL,IY
+
+DoNASPI:
+	ld	ix,(NASPI)
+	ld	(ix+06h),b		; NASPI configuration
+
+	push	bc
+	push	de
+	push	hl
+
+	ld	de,10h
+	add	ix,de			; Calc. SRB address
+	push	ix
+	pop	de
+	push	iy
+	pop	hl
+	ld	bc,10
+	ldir
+
+	pop	hl
+	pop	de
+	pop	bc
+
+	ld	(ix+12),a		; Target ID
+
+	ld	(ix+13),e
+	ld	(ix+14),d		; Transfer length
+
+	ld	a,10
+	ld	(ix+15),a		; CDB length
+
+	ld	(ix+16),l
+	ld	(ix+17),h		; Pointer to data area
+
+	ld	a,00000000b		; Data In, 1 byte/read
+	ld	(ix+18),a		; Control
+
+	ld	hl,($SECBUF)
+	ld	(ix+22),l
+	ld	(ix+23),h		; Pointer to Sense Data buffer
+
+	ld	ix,ExeNASPI
+	jp	NOVAXIS
+
+Error:	call	Print
+	ld	c,0
+	jp	BDOS
+
+Print:	ld	a,(hl)
+	and	a
+	ret	z
+	inc	hl
+	push	hl
+	push	ix
+	ld	ix,CHPUT
+	call	BIOS
+	pop	ix
+	pop	hl
+	jr	Print
+
+PrintXY:
+	ld	a,(hl)
+	and	a
+	ret	z
+	cp	254
+	jr	nz,NoXY
+	inc	hl
+	ld	a,(hl)
+	inc	hl
+	push	hl
+	ld	l,(hl)
+	ld	h,a
+	push	ix
+	ld	ix,POSIT
+	call	BIOS
+	pop	ix
+	pop	hl
+	inc	hl
+	jr	PrintXY
+	
+NoXY:	inc	hl
+	push	hl
+	push	ix
+	ld	ix,CHPUT
+	call	BIOS
+	pop	ix
+	pop	hl
+	jr	PrintXY
+
+CharPut:
+	push	ix
+	ld	ix,CHPUT
+	call	BIOS
+	pop	ix
+	and	a
+	ret
+
+KillBuf:
+	ld	ix,KILBUF
+
+BIOS:	ld	iy,(EXPSLT-1)
+	call	CALSLT
+	ret
+
+NOVAXIS:
+	ld	iy,(data+1-1)
+	jp	CALSLT
+
+; CHKVER.GEN - Check version of NOVAXIS ROM
+; (C) 1994 KMcs
+; Written by Jurgen Kramer - 16/11/94 -
+; - 11/12/94 -
+; Modified - 04/04/95 -
+
+; Input	: DE = Version number to compare with (eg v0.60 > DE = 0060h)
+;	  A  = Slot ID
+; Output: HL = Found version number
+;         Carry is set when NOVAXIS BIOS version is too old
+
+ChkVer:	push	de
+	ld	h,40h
+	call	024h
+	ld	hl,(NOVAVER)	
+	ld	a,(NOVAREV)
+	push	af
+	push	hl
+	ld	a,(0f342h)
+	ld	h,40h
+	call	024h
+	pop	hl
+	pop	af
+	pop	de
+	cp	CurRev
+	scf
+	ret	nz
+	ld	a,l
+	cp	e
+	jr	z,ChkLo
+	scf
+	ret
+ChkLo:	ld	a,h
+	cp	d
+	scf
+	ret	nz
+	ccf
+	ret
+
+;ChkVer:	push	de
+;	ld	h,40h
+;	call	024h
+;	ld	hl,(NOVAVER)	
+;	push	hl
+;	ld	a,(0f342h)
+;	ld	h,40h
+;	call	024h
+;	pop	hl
+;	pop	de
+;	ld	a,l
+;	sub	e
+;	jr	z,ChkLo
+;	ret
+;ChkLo:	ld	a,h
+;	sub	d
+;	ret
+
+
+; SRCHROM.ASM - Search for NOVAXIS SCSI BIOS
+; (C) 1994 KMcs
+; Written by Jurgen Kramer - 15/11/94 -
+
+; Modified for NOVAXIS SCSI BIOS search
+; Only searches in page 1 (4000h - 07fffh)
+
+; ROMSEARCH v1.2 (C) 1992 KMcs
+; Written by Jurgen Kramer - 31/05/92
+; (C) 1992 First Class Software
+; Searches for ROM with STATEMENTs (eg. CALL MUSIC)
+; Only for page 1 and 2
+
+; IN     : IX = address of textstring in ROM
+;          IY = address of textstring in RAM -> defb length,'text to search'
+;
+;          HL = Data Field address
+;
+; OUT	: Data Field  (see example)
+;	: Zero Flag is Reset when ROM is found (A = 255)
+;
+; USED   : HL,IX,IY
+;
+; Data Field :  (example)
+;
+;            defb MUSIC   - 255 = ROM FOUND   - 0 = NO ROM FOUND
+;            defb MUS_ID  - slot address ID
+;            defb MUSPRI  - primairy slot
+;            defb MUSSEC  - secondairy slot
+;
+
+SrchROM:
+	push	hl
+        ld	hl,SLTATR+1
+        xor	a
+        ld	b,4
+Loop_2:	push	bc
+        ld	b,4
+Loop_1:	push	bc
+        push	af
+        push	hl
+        set	7,a
+        ld	(ROM_ID),a
+        push	af
+        ld	h,40h
+        pop	af
+        call	ENASLT
+	jr	Start
+
+TeWeg:	pop	hl
+        pop	af
+        add	a,4
+        and	0fh
+	inc	hl
+	inc	hl
+	inc	hl
+	inc	hl
+	pop	bc
+        djnz	Loop_1
+        add	a,1
+        and	00000011b
+        pop	bc
+        djnz	Loop_2
+        xor	a
+        ld	(ROMFND),a
+        jr	Loop_4
+
+Start:	ld	b,(iy+00h)		; Get # of bytes to check    
+
+Loop:	ld	a,(iy+01h)
+        cp	(ix)
+        jr	nz,TeWeg
+        inc	iy
+        inc	ix
+        djnz	Loop
+        pop	hl
+        pop	hl
+        pop	hl
+        pop	hl
+        ld	a,255
+        ld	(ROMFND),a
+
+Loop_4	ld	h,40h
+        ld	a,(RAMAD1)
+        call	ENASLT
+        pop	hl
+        ld	a,(ROMFND)
+        and	a
+	ret	z
+	push	af
+        ld	(hl),a
+        inc	hl
+        ld	a,(ROM_ID)
+        ld	(hl),a
+        inc	hl
+        push	af
+        and	3
+        ld	(hl),a
+        inc	hl
+        pop	af
+        and	12
+        rra
+	rra
+        ld	(hl),a
+	pop	af
+	and	a
+        ret
+
+; EXError - EXplain error and exit
+; Input	: -
+; Output: -
+; Modify:
+
+EXError:
+	call	RetrSns
+	call	PrSense
+	jp	Error
+
+; PrSense - Print Sense info
+; Input	: -
+; Output: -
+; Modify: AF,
+
+PrSense:
+	ld	ix,(NASPI)
+	ld	de,10h
+	add	ix,de
+
+	ld	hl,ErrUnExp
+	call	Print
+	
+	ld	hl,ErrTarget
+	call	Print
+	ld	a,(ix+12)
+	call	PrintHex
+		
+	ld	hl,ErrStatus
+	call	Print
+	ld	a,(ix+20)
+	push	af
+	call	PrintHex
+	pop	af
+	call	ExpTrgStt		; Expl. Target Status
+
+	ld	hl,ErrSnsKey
+	call	Print
+	ld	a,(SnsKey)
+	push	af
+	call	PrintHex
+	pop	af
+	call	ExpSnsKey		; Exp. Sense Key
+	
+	ld	hl,ErrSnsCod
+	call	Print
+	ld	a,(SnsCod)
+	call	PrintHex
+	
+	ld	hl,ErrSnsAdd
+	call	Print
+	ld	a,(SnsAdd)
+	call	PrintHex
+	ld	hl,CRLF
+	jp	Print
+
+; RetrSns - Retrieve Sense
+; Input	: -
+; Ouput : Carry = 1, when Sense could not be read
+; Modify: AF,IX
+
+RetrSns:
+	ld	ix,($SECBUF)
+	ld	a,(ix+00)
+	and	01111111b
+	cp	70h
+	scf
+	ret	nz
+	ld	a,(ix+02)
+	and	00001111b
+	ld	(SnsKey),a
+	ld	a,(ix+12)
+	ld	(SnsCod),a
+	ld	a,(ix+13)
+	ld	(SnsAdd),a
+	and	a
+	ret
+
+; ChkAudErr - Check Audio Error
+; Input	: -
+; Output: Cy = 1 when the error is serious
+; Modify:
+
+ChkAudErr:
+	call	RetrSns
+	ret	c
+	ld	a,(SnsKey)
+	and	a		; NO SENSE ?
+	jr	nz,SerErr
+	ld	a,(SnsCod)
+	and	a
+	jr	nz,SerErr
+	ld	a,(SnsAdd)
+	cp	11h		; Audio Playback in progress ?
+	jr	nz,SerErr
+	and	a
+	ret
+
+SerErr:	scf
+	ret
+; PrintHex - Print byte as Hex
+; Input	: A
+; Output: -
+; Modify:
+; Note	: first digit of zero is not surpressed
+
+PrintHex:
+	push	af
+	and	11110000b
+	srl	a
+	srl	a
+	srl	a
+	srl	a
+	add	a,30h
+	cp	3ah		; > 9 ?
+	jr	c,NoHex
+	add	a,7
+NoHex:	call	CharPut
+	pop	af
+	and	00001111b
+	add	a,30h
+	cp	3ah
+	jr	c,NoHex2
+	add	a,7
+NoHex2:	call	CharPut
+	ld	a,'h'
+	jp	CharPut
+
+; PrintBCD - Print byte as BCD (max. 99)
+; Input	: A
+; Output: -
+; Modify:
+; Note	: first digit of zero is not surpressed
+
+PrintBCD:
+	call	Byte2BCD	; Convert byte
+	push	af
+	and	11110000b
+	srl	a
+	srl	a
+	srl	a
+	srl	a
+	add	a,30h
+	call	CharPut
+	pop	af
+	and	00001111b
+	add	a,30h
+	jp	CharPut
+
+; Byte2BCD - Convert HEX byte to BCD
+; Input : A = Byte to convert
+; Output: D = A = BCD
+; Modify: F,C
+
+Byte2BCD:
+	ld	b,8		; # of bits of the HEX-number
+        ld	d,0
+	ld	c,a
+Byte:	rl	c
+        ld	a,d
+        adc	a,a
+        daa
+        ld	d,a
+        djnz	Byte
+	ret
+	
+; ExpTrgStt - Expl. Target Status
+; Input	: A = Target Status
+; Output:
+; Modify: AF,B,DE,HL
+
+ExpTrgStt:
+	ld	hl,TrgSttMsg
+	ld	de,31			; String length
+	ld	b,9			; Max. messages
+NxtMsg	cp	(hl)			; Right msg?
+	jr	z,RghtMsg
+	add	hl,de			; Next message
+	djnz	NxtMsg
+	ret				; There no message available
+RghtMsg:
+	inc	hl			; Skip status descriptor
+	jp	Print			; Print and return
+
+; ExpSnsKey - Expl. Sense Key
+; Input	: A = Sense Key
+; Output:
+; Modify:
+
+ExpSnsKey:
+	ld	hl,SnsKeyMsg
+	ld	de,20
+	ld	b,14
+	jr	NxtMsg
+
+CRLF	defb	cr,lf,eol
+
+; Error messages
+
+ErrUnExp	defb	cr,lf,'** Unexpected SCSI Command Failure',cr,lf
+		defb	cr,lf,eol
+ErrTarget	defb	cr,lf,09,'Target SCSI ID:',09,09,eol
+ErrStatus	defb	cr,lf,09,'Target Status: ',09,09,eol
+ErrSnsKey	defb	cr,lf,09,'Sense Key:',09,09,eol
+ErrSnsCod	defb	cr,lf,09,'Sense Code:',09,09,eol
+ErrSnsAdd	defb	cr,lf,09,'Add. Sense:',09,09,eol
+
+; Target Status messages (31 bytes)
+
+TrgSttMsg:
+	defb	00h,09,'- Good                      ',eol
+	defb	02h,09,'- Check Condition           ',eol
+	defb	04h,09,'- Condition Met             ',eol
+	defb	08h,09,'- Busy                      ',eol
+	defb	10h,09,'- Intermediate              ',eol
+	defb	14h,09,'- Intermediate Condition Met',eol
+	defb	18h,09,'- Reservation Conflict      ',eol
+	defb	22h,09,'- Command Failure           ',eol
+	defb	28h,09,'- Queue Full                ',eol
+
+; Sense Key messages (20 bytes)
+
+SnsKeyMsg:
+	defb	00h,09,'- No Sense       ',eol
+	defb	01h,09,'- Recoverd Error ',eol
+	defb	02h,09,'- Not Ready      ',eol
+	defb	03h,09,'- Medium Error   ',eol
+	defb	04h,09,'- Hardware Error ',eol
+	defb	05h,09,'- Illegal Request',eol
+	defb	06h,09,'- Unit Attention ',eol
+	defb	07h,09,'- Data Protect   ',eol
+	defb	08h,09,'- Blank Check    ',eol
+	defb	0ah,09,'- Copy Aborted   ',eol
+	defb	0bh,09,'- Aborted Command',eol
+	defb	0ch,09,'- Equal          ',eol
+	defb	0dh,09,'- Volume Overflow',eol
+	defb	0eh,09,'- Miscompare     ',eol
+
+	
+
+; ** SCSI Commands
+
+; *** PLAY AUDIO (10)
+
+PLAY10:	defb	45h
+	defb	0
+	defb	0,0,0,0
+	defb	0
+	defb	0,0	; Transfer length is 0
+	defb	0
+
+; *** READ TOC
+
+READTOC:
+	defb	43h
+	defb	00000010b	; MSF = 1
+	defb	0,0,0,0
+	defb	0
+	defb	0,0
+	defb	0
+
+; *** READ SUB-CHANNEL
+
+READSUB:
+	defb	42h
+	defb	00000010b	; MSF = 1
+	defb	01000000b	; SubQ = 1
+	defb	0
+	defb	0,0
+	defb	0
+	defb	0,0
+	defb	0
+
+; *** PLAY AUDIO TRACK INDEX
+
+PLAYATI:
+	defb	48h
+	defb	0
+	defb	0,0
+	defb	0		; Starting Track
+	defb	1		; Starting index
+	defb	0
+	defb	0		; Ending Track
+	defb	99		; Ending Index
+	defb	0
+
+; *** PLAY AUDIO MSF
+
+PLAYMSF:
+	defb	47h
+	defb	0
+	defb	0
+	defb	0,0,0		; Starting Track (MSF)
+	defb	0,0,0		; Ending Track (MSF)
+	defb	0
+
+; *** PAUSE / RESUME
+
+PAUSE:	defb	4bh
+	defb	0
+	defb	0,0,0,0,0,0
+	defb	0		; Bit 0 = Resume
+	defb	0
+
+; ** Data area
+
+SCSI_ID:	defb	3,'HD#'
+NOVA_ID:	defb	4,'KMcs'
+
+; Error messages
+
+ErrNoSCSI:	defb	cr,lf,'No SCSI ROM found',cr,lf,eol
+ErrNoNOVA:	defb	cr,lf,'No NOVAXIS SCSI ROM',cr,lf,eol
+ErrWrngVr	defb	cr,lf,'Wrong version of NOVAXIS SCSI BIOS',cr,lf,eol
+ErrNoNASPI:	defb	cr,lf,'NASPI support disabled',cr,lf,eol
+ErrNotAU:	defb	cr,lf,'This CD-ROM drive does not support audio'
+		defb	' play operations',cr,lf,eol 
+ErrTrg:		defb	cr,lf,'Target not ready',cr,lf,eol
+ErrMedium:	defb	cr,lf,'No medium present',cr,lf,eol
+ErrCDROM:	defb	cr,lf,'Selected device is not a CD-ROM',cr,lf,eol
+
+; Messages
+
+InitTxt:	defb	12,'NOVAXIS CD-PLAYER version 0.72 - (c) 1995 KMcs'
+		defb	cr,lf
+		defb	'Written by Jurgen Kramer - 22/11/95 -',cr,lf,eol
+
+FrstTxt:	defb	254,01,04,'First Track: ',eol
+LastTxt:	defb	254,22,04,'- Last Track: ',eol
+TotTrkTxt:	defb	254,01,21,'Total Tracks: ',eol
+StatusTxt:	defb	254,32,21,'Status: ',eol
+ElapsedTxt:	defb	254,55,21,'Elapsed Time: ',eol
+CurTrTxt:	defb	254,28,08,'Track: ',eol
+CurTiTxt:	defb	254,38,08,'- ',eol
+
+KeysTxt:	defb	254,16,12
+	defb	'<<          >          ',255,'         ',0c6h,0c6h
+	defb	'          >>'
+	defb	254,12,14
+	defb	'Pre(v)ious   (P)lay      (S)top    Pa(u)se  '
+	defb	'   (N)ext',254,09,16
+	defb	'Fast (R)everse',254,56,16,'Fast (F)orward',eol
+
+; AUDIO Status messages
+
+AudPIP:		defb	'Playing',eol
+AudPsd:		defb	'Paused ',eol
+AudStp:		defb	'Stopped',eol
+AudErr:		defb	'Error  ',eol
+
+FncDat:	defw	CDEject
+	defw	CDForward
+	defw	CDNext
+	defw	CDPlay
+	defw	CDReverse
+	defw	CDStop
+	defw	CDPause
+	defw	CDPrevious
+
+AudDat:	defw	AudPIP
+	defw	AudPsd
+	defw	AudStp
+	defw	AudErr
+
+ROMFND:	defb	0
+	defb	0
+ROM_ID:	defb	0
+	defb	0
+data:	defb	0,0,0,0
+
+version:
+	defw	0
+NASPI:	defw	0
+CDROMID:
+	defb	2
+
+SnsCod:	defb	0
+SnsKey:	defb	0
+SnsAdd:	defb	0
+
+FirstTr:	defb	0
+LastTr:		defb	0
+TotTr:		defb	0
+CurTr:		defb	0
+CurIn:		defb	0
+AudStt:		defb	0
+Action:		defb	0
+
+TOCSize:	defw	0
+TotMSF:		defb	0,0,0
+MinMSF:		defb	0,0,0
+
+TOCBuf:	defs	1024,0
+
+Buffer:	
+
+	end
+

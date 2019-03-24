@@ -1,0 +1,446 @@
+; NUTIL.HDR - Header file for NOVAXIS utilities that need NASPI en the
+; environment variables set by NUTIL
+; (c) 1995 KMcs
+; Written by Jurgen Kramer
+; v0.01 - 07/11/95 -
+; v0.02 - 10/11/95 -
+
+; Environment variables:
+;
+; NOVAXIS=	- Holds NOVAXIS BIOS ver. + rev.
+; NASPI=	- Holds NASPI ver. (0 = not installed)			*
+; NCDROM=       - Holds ID(s) of CDROM(s), (No = No CD-ROM) each ID is 
+;			seperated by a ','. eg 'CDROM=2,4,5'
+; NSLOT=	- Holds slot ID of (1st) NOVAXIS ROM (eg 20 = slot 2-0)
+
+; Variables marked with * are only available when the installed NOVAXIS BIOS
+; supports it's feature represented
+
+CurVer: equ     0159h           ; Current NOVAXIS version # 1.59
+CurRev: equ     30h             ; Current revision level
+
+SCSIROM         equ     07f80h
+NOVAROM         equ     07ff0h
+NOVAVER         equ     07ff5h
+
+GetUnitsOn      equ     07fc8h
+Inquiry         equ     07f92h
+GetNWA          equ     07fech  ; Get NASPI Work Area (v1.59.01 and up)
+
+ENASLT	equ	24h
+CALSLT	equ	01ch
+CHPUT	equ	0a2h
+
+EXPSLT	equ	0fcc1h
+SLTATR	equ	0fcc9h
+RAMAD1	equ	0f342h
+$SECBUF equ     0f348h
+
+BDOS	equ	05h
+
+_term0	equ	00h
+_dosver equ     6fh
+_genv   equ     6bh
+_senv   equ     6ch
+_fenv   equ     6dh
+_term	equ	62h
+
+cr	equ	0dh
+lf	equ	0ah
+eol	equ	0
+
+
+ID	equ	0adh		; Change to your ID
+VERHI	equ	00h		; High part of version (0-9)
+VERLO   equ     02h             ; Low part of version
+
+	org	0100h
+
+	jp	begin
+
+	defb	'NOVAXIS'
+        defb    ID                      ; ID for ....
+        defb    VERHI,VERLO             ; ..... version x.xx 
+	defb	'EUR'			; Landcode: Europe
+        defb    01h,59h                 ; Works with NOVAXIS version 1.59
+        defb    00h,50h                 ; Needs env. var. set by NUTIL v0.50
+        defb    00h,33h                 ; Needs NASPI v0.33
+
+	defw	0,0,0,0			; Reserved
+        defw    0,0                     ; Reserved
+
+; ID definition:
+;
+;	a0h			NDSKFMT - NOVAXIS Low level disk formatter 
+; 	a1h			SCANID	- NOVAXIS SCSI device scanner
+;	a2h			HOSTID	- NOVAXIS get/set HOSTID 
+;	a3h			NFORMAT	- NOVAXIS logical disk formatter
+;	a4h			MAP	- NOVAXIS partition to a logical drive
+;	a5h			NFDISK	- NOVAXIS FDISK
+;	a6h			LOCK	- NOVAXIS LOCK, locks removable media
+;	a7h			UNLOCK	- NOVAXIS UNLOCK, ulocks rem. media
+;	a8h			EMERGID	- NOVAXIS EMERGency ID, NOT RELEASED !!
+;	a9h		*	CDIR	- NOVAXIS CD-ROM DIRectory
+;	aah		*	CCD	- NOVAXIS CD-ROM Change Directory
+;	abh		*	CCOPY	- NOVAXIS CD-ROM COPY
+;	ach		*	CDPLAY	- NOVAXIS CD-ROM AUDIO-PLAYER
+;	adh			NUTIL	- NOVAXIS UTIL setup see below
+;	aeh - 0c0h		Reserved
+;
+; Programs marked with * use the environment variables setup by NUTIL !!
+
+; Landcodes:
+;
+; 'JAP'	- Japan
+; 'ITA' - Italy
+; 'FRA' - France
+; 'SWI' - Switzerland
+; 'NET' - Netherlands
+; 'SPA' - Spain
+; 'GER' - Germany
+; 'AUS' - Austria
+; 'BEL' - Belgium
+; 'EUR' - Europe
+
+; Check DOS version, DOS2 or up is needed
+
+begin:  ld      c,_dosver
+	call	BDOS
+        ld      hl,ErrNoDOS
+        and     a               ; MSX-DOS ?
+        jp      nz,Error        ; No
+        ld      hl,ErrDOS
+        ld      a,b
+        cp      2               ; MSX-DOS 2 or up ?
+        jp      c,Error         ; No
+
+        xor     a
+        ld      hl,SLT_ENV
+	push	hl
+        call    Get_Chk_Env     ; Get and check NSLOT env. var.
+	pop	hl
+	
+        jr      nc,SLTOk
+
+	jp	m,EnvErr
+
+SLTOk:  jp	Exit
+
+	ld      a,1
+        ld      hl,NOV_ENV
+        call    Get_Chk_Env     ; Get and check NOVAXIS env. var.
+        jr      nc,NOVOk
+
+NOVOk:  ld      a,2
+        ld      hl,NAS_ENV
+        call    Get_Chk_Env     ; Get and check NASPI env. var.
+        jr      nc,NASOk
+
+NASOk:  ld      a,3
+        ld      hl,CDR_ENV
+        call    Get_Chk_Env     ; Get and check NCDROM env. var
+
+;        jr      nc,
+
+	jp	Exit
+
+
+
+; Check if NOVAXIS is installed
+
+        ld      hl,0fb20h
+        ld      de,ErrNotIns
+        ld      b,4
+        ld      a,(ROMID)       ; Get NOVAXIS slot ID
+	and	01111111b
+ChkNOV: cp      (hl)
+        jr      z,NOVIns
+        inc     hl
+        inc     hl
+        djnz    ChkNOV
+        ex      de,hl
+        jp      Error
+
+; *** Main
+
+NOVIns:
+
+
+
+Exit:   ld      c,_term
+        ld	b,0		; No error
+	jp      BDOS
+
+; *** End main
+
+Error:	call	Print
+	ld	c,_term0
+	jp	BDOS
+
+EnvErr: call    Print
+        ld      hl,ErrEnvTxt
+        call    Print
+        jr      Exit
+        
+Print:	ld	a,(hl)
+	and	a
+	ret	z
+	inc	hl
+	push	hl
+	ld	ix,CHPUT
+	call	BIOS
+	pop	hl
+	jr	Print
+
+BIOS:	ld	iy,(EXPSLT-1)
+	call	CALSLT
+	ret
+NOVAXIS:
+        ld      iy,(ROMID-1)
+	jp	CALSLT
+
+; Get_Chk_Env - Get and Check Environment variable
+; Input : A = 00 - Check NOVAXIS ROM (with slot ID)
+;             01 - Check NOVAXIS version #
+;             02 - Check NASPI version #
+;             03 - Check for CD-ROM
+;         HL = ASCIIZ name string
+; Output: Cy=0 Ok, Cy=1 and A = 00h - not installed
+;                           A = 01h - incorrect version #
+;                           A = 02h - invalid value
+;                           A = 03h - Not found (SCSI ROM)
+;                           A = 04h - Not found (NOVAXIS ROM)
+;                           A = ffh - env. var. not found
+; Modify:
+
+Get_Chk_Env:
+        push    af
+        call    GetEnv          ; Get Environment string
+        jr      c,ENVnf         ; Not found
+        pop     af
+        and     a
+        
+	jr      z,ChkROM
+
+	ret
+
+        dec     a
+        jr      z,ChkVER
+        dec     a
+        jr      z,ChkNAS
+
+; Check CD-ROM
+
+
+; Check NOVAXIS ROM (NSLOT)
+
+ChkROM:
+
+	ret
+
+        ld      a,(ROMID)
+        ld      h,40
+        call    ENASLT
+        ld      de,TmpBuf
+        ld      hl,07f80h
+        ld      bc,3
+        ldir
+        ld      hl,07ff0h
+        ld      bc,4
+        ldir
+        ld      a,(RAMAD1)
+        ld      h,40h
+        call    ENASLT
+        ld      de,TmpBuf
+        ld      hl,SCSI_ID
+        ld      b,3
+ChkSCSI:
+        ld      a,(de)
+        cp      (hl)
+        jr      nz,NotSCSI
+        inc     de
+        inc     hl
+        djnz    ChkSCSI
+        ld      de,TmpBuf
+        ld      hl,NOVA_ID
+        ld      b,4
+ChkNOVA:
+        ld      a,(de)
+        cp      (hl)
+        jr      nz,NotNOVA
+        inc     de
+        inc     hl
+        djnz    ChkNOVA
+        and     a
+        ret
+
+NotSCSI:
+        ld      a,3
+	and	a
+        scf
+        ret
+NotNOVA:
+        ld      a,4
+	and	a
+        scf
+        ret
+
+; Check Version # (NOVAXIS)
+
+ChkVER:
+
+
+; Check NASPI version # (NASPI)
+
+ChkNAS:
+
+
+
+ENVinv:
+        ld      a,02h
+	and	a
+        scf
+        ret
+
+ENVnf:  pop     af
+        ld      a,0ffh
+	and	a
+        scf
+        ret
+
+; GetEnv - Get Environment variable
+; Input : HL = ASCIIZ name string
+; Output: Carry = 1 then string not found, otherwise DE = EnvBuf
+; Modify:
+
+GetEnv:
+;        ld      bc,0ff00h + _genv
+
+	ld	b,255
+	ld	c,_genv
+	ld      de,EnvBuf
+        call    BDOS
+        ld      a,(de)
+        and     a               ; Buffer empty ?
+        ret     nz              ; No
+        scf
+        ret
+        
+; CnvBCD - Convert byte to ASCII
+; Input	: A = BCD
+; Output: D = 1st digit, A = 2nd
+; Modify: F,B
+
+CnvBCD:
+	ld	b,a
+	and	11110000b
+	rlca
+	rlca
+	rlca
+	rlca
+	add	a,30h
+	ld	d,a
+	ld	a,b
+	and	00001111b
+	add	a,30h
+	ret
+
+; CnvHEX - Convert byte to HEX (ASCII)
+; Input	: A = HEX byte
+; Output: D = 1st digit, A = 2nd
+; Modify: F,B
+
+CnvHEX:
+	ld	b,a
+	and	11110000b
+	rlca
+	rlca
+	rlca
+	rlca
+	add	a,30h
+	cp	3ah		; > 9 ?
+	jr	c,NoHex
+	add	a,7
+NoHex:	ld	d,a
+	ld	a,b
+	and	00001111b
+	add	a,30h
+	cp	3ah
+	ret	c
+	add	a,7
+	ret
+
+; CHKVER.GEN - Check version of NOVAXIS ROM
+; (C) 1994 KMcs
+; Written by Jurgen Kramer - 16/11/94 -
+; - 11/12/94 -
+; Modified - 04/04/95 -
+
+; Input	: DE = Version number to compare with (eg v0.60 > DE = 0060h)
+;	  A  = Slot ID
+; Output: HL = Found version number
+;         Carry is set when NOVAXIS BIOS version is too old
+
+ChkVer:	push	de
+	ld	h,40h
+	call	024h
+	ld	hl,(NOVAVER)	
+	push	hl
+	ld	a,(0f342h)
+	ld	h,40h
+	call	024h
+	pop	hl
+	pop	de
+	ld	a,l
+	sub	e
+	jr	z,ChkLo
+	ret
+ChkLo:	ld	a,h
+	sub	d
+	ret
+
+SCSI_ID:	defb	3,'HD#'
+NOVA_ID:	defb	4,'KMcs'
+
+; Messages
+
+
+; Error messages
+
+ErrNoSCSI:	defb	cr,lf,'No SCSI ROM found!',cr,lf,eol
+ErrNoNOVA:	defb	cr,lf,'No NOVAXIS SCSI ROM!',cr,lf,eol
+ErrWrngVr	defb	cr,lf,'Wrong version of NOVAXIS SCSI BIOS',cr,lf,eol
+ErrDOS          defb    cr,lf,'This program requires MSX-DOS2',cr,lf,eol
+ErrNoDOS        defb    cr,lf,'No MSX-DOS found',cr,lf,eol
+ErrNotIns       defb    cr,lf,'NOVAXIS is not installed',cr,lf,eol
+ErrEnvTxt       defb    ' environment variable not found',cr,lf,eol
+
+version:
+	defw	0
+ROMID:  defb    0
+
+NOV_ENV:	defb    'NOVAXIS',0
+NAS_ENV:	defb	'NASPI',0
+CDR_ENV:	defb	'NCDROM',0
+SLT_ENV:	defb	'NSLOT',0
+
+cdroms:		defb	0
+
+EnvBuf:		defs	255,0
+TmpBuf:         defs    8,0
+        end
+
+     end
+
+ENV:	defb    'NOVAXIS',0
+NAS_ENV:	defb	'NASPI',0
+CDR_ENV:	defb	'NCDROM',0
+SLT_ENV:	defb	'NSLOT',0
+
+cdroms:		defb	0
+
+EnvBuff:	defs	255,0
+TmpBuf:         defs    8,0
+        end
+
+

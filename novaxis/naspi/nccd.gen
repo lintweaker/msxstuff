@@ -1,0 +1,771 @@
+; CCD.GEN - Change CD-ROM Directory
+; (c) 1995 KMcs
+; Adapted for NOVAXIS NASPI by Jurgen Kramer
+; v0.10 - 03/11/95 -
+; v0.11 - 06/11/95 - Set BPR to 2 (32 bytes per read)
+; v0.12 - 08/11/95 - Special release version, works only with NOVAXIS v1.59.30
+; v0.13 - 22/11/95 - Ditto for 'Austria', only works with NOVAXIS v1.59.37
+; CDROM ID is still static and set to 2
+; - 19/09/96 - Ditto for Zandvoort '96, works with v1.69.56
+; - 04/12/96 - Test release for A. Minaard, works with v1.69.59
+
+CDROMID	equ	2
+
+;
+;	ccd.com
+;
+;	Change the CD-ROM current directory.
+;
+;	Henrik Gilvad 1994
+;
+
+Root	equ 0F7AFh	;Long Word with the sectornumber of current CDROM dir.
+
+CurVer: equ     6901h           ; Current NOVAXIS version # 1.69
+CurRev	equ	59h
+
+SCSIROM	equ	07f80h
+NOVAROM	equ	07ff0h
+NOVAVER	equ	07ff5h
+NOVAREV	equ	07ff9h
+
+ENASLT	equ	24h
+CALSLT	equ	01ch
+CHPUT	equ	0a2h
+
+EXPSLT	equ	0fcc1h
+SLTATR	equ	0fcc9h
+RAMAD1	equ	0f342h
+
+BDOS	equ	05h
+
+cr	equ	0dh
+lf	equ	0ah
+eol	equ	0
+
+ID	equ	0aah		; Change to your ID
+VERHI	equ	00h		; High part of version (0-9)
+VERLO	equ	13h		; Low part of version
+
+	org	0100h
+
+	jp	begin
+
+	defb	'NOVAXIS'
+	defb	ID			; ID for CCD
+	defb	VERHI,VERLO		; CCD version 0.13 
+        defb    'EUR'                   ; Landcode: Europe
+        defb    01h,59h                 ; Works with NOVAXIS version 1.59
+        defb    00h,00h                 ; Needs env. var. set by NUTIL v0.00
+        defb    00h,33h                 ; Needs NASPI v0.33
+
+	defw	0,0,0,0			; Reserved
+        defw    0,0                     ; Reserved
+
+begin:	ld	ix,SCSIROM		; Check for SCSI ROM
+	ld	iy,SCSI_ID
+	ld	hl,data
+	call	SrchROM
+	ld	hl,ErrNoSCSI
+	jp	z,Error
+
+	ld	ix,NOVAROM		; Check for NOVAXIS ROM
+	ld	iy,NOVA_ID
+	ld	hl,data
+	call	SrchROM
+	ld	hl,ErrNoNOVA
+	jp	z,Error
+
+	ld	a,(data+1)		; Check NOVAXIS version #
+	ld	de,CurVer
+	call	ChkVer
+	ld	(version),hl		; Save NOVAXIS version #
+	ld	hl,ErrWrngVr
+	jp	c,Error
+
+	call	GetNWA
+	ld	hl,ErrNoNASPI
+	jp	c,Error
+	ld	(aspi),ix
+
+; *** Begin main
+
+	Call MakePath		;Make the Filename Compare string.
+	CALL AnalDir		;Remember CurDir + Parent Dir #
+	LD HL,Buf		;Skip '.'
+	CALL LDBCHL
+	ADD HL,BC
+	CALL LDBCHL
+	ADD HL,BC
+
+	LD A,(ParseFl)		;If ".." then just copy ParentDirSec#
+	BIT 7,A 		;to 'CurrentDirSec#'
+	JR Z,MainCCD		;Else Search for the name.
+	LD HL,(ParDir)
+	LD (Root),HL
+	LD HL,(ParDir+2)
+	LD (Root+2),HL
+	LD A,#C0
+	LD (Root+4),A
+	JP Exit
+
+MainCCD:
+	CALL LDBCHL
+	LD A,C			;Illegal Length of next field ?
+	AND A
+	JP Z,EndOfDir		;Check for end of dir.
+
+	ADD HL,BC
+	PUSH HL 		;Push start of next entry
+	SBC HL,BC
+	PUSH HL
+	POP IX
+	LD BC,#21
+	ADD HL,BC
+	LD C,(IX+#20)		;Len of name
+	PUSH HL 		;Clear NameStr.
+	PUSH DE
+	PUSH BC
+	LD HL,NameStr
+	LD DE,NameStr+1
+	LD (HL),0
+	LD BC,11
+	LDIR
+	POP BC
+	POP DE
+	POP HL
+	LD DE,NameStr
+	LDIR
+	DEC DE
+	DEC DE
+	LD A,(DE)
+	SUB ';'
+	JR NZ,NotFil
+	LD (DE),A
+NotFil: LD DE,NameStr		;Format Filename
+	LD HL,Name2
+	LD C,#5C
+	CALL BDOS
+	CALL Wanted		;Compare the Filename with the Wanted names.
+	JR NZ,Next
+	LD A,(IX+#18)		;1 CD had the 'DIR' mark at this location,
+	CP 2
+	JR Z,ItsADir
+	LD A,(IX+#19)		;all others had it here.
+	CP 2
+	JR Z,ItsADir
+Next:	POP HL
+	JP MainCCD
+
+ItsADir:LD E,(IX+2)		;Copy the Sector# to new RootSector#
+	LD D,(IX+3)
+	LD C,(IX+4)
+	LD B,(IX+5)
+	LD (Root),DE
+	LD (Root+2),BC
+	LD A,0c0h		;Set the Sector# valid flag.
+	LD (Root+4),A
+	JP Exit
+
+EndOfDir:
+	LD A,(SecCnt)		;Is there more sectors in this dir ?
+	DEC A
+	JR Z,ItEnded
+	LD (SecCnt),A
+	LD DE,(SecL)		;then load the next sector
+	LD BC,(SecH)
+	inc de			;INC BCDE
+	ld a,e
+	or d
+	jr nz,Endof2
+	inc bc
+Endof2: LD (SecL),DE
+	LD (SecH),BC
+	CALL RdSec
+	LD HL,Buf
+	JP MainCCD
+
+ItEnded:LD DE,NotFound
+	LD C,9
+	CALL BDOS
+
+Exit:	LD C,062h
+	LD B,0
+	JP BDOS
+
+LDBCHL: LD C,(HL)
+	INC HL
+	LD B,(HL)
+	DEC HL
+	RET
+
+;This routine is called with a LONGWORD sector number in (Root)
+
+AnalDir:LD BC,(Root+2)		;Read 1.st sector of currect dir.
+	LD DE,(Root)
+	LD (SecL),DE		;A copy of the current sector number.
+	LD (SecH),BC
+	CALL RdSec
+	LD A,(Buf+11)	       ;Len of Directory
+	RRA
+	RRA
+	RRA
+	and %00011111
+	LD (SecCnt),A		;How many Sectors left in current directory.
+
+	LD HL,(Buf+2)		;Remember Current Directory 1. sector.
+	LD (CurDir),HL
+	LD BC,(Buf+4)
+	LD (CurDir+2),BC
+	LD HL,Buf+2		;Remember Parent Directory 1. sector.
+	LD BC,(Buf)
+	ADD HL,BC
+	LD C,(HL)
+	INC HL
+	LD B,(HL)
+	INC HL
+	LD (ParDir),BC
+	LD C,(HL)
+	INC HL
+	LD B,(HL)
+	INC HL
+	LD (ParDir+2),BC
+	RET
+
+
+FindRot:LD BC,#0200		;Sector #12 + #13 to buffer.
+	LD DE,#0010
+	CALL RdSec
+	LD BC,#0200		;Once more, then the buffer must have been
+	LD DE,#0010		;cleared if it is a new CD.
+	CALL RdSec
+	LD BC,#0200
+	LD DE,#0010
+	CALL RdSec
+
+	LD A,(Buf)		;Read id. If the ID is the sector# then go
+	CP #10			;to the special routine.
+	JR Z,FixIt
+	CP #01			;Do the same if the ID is not #01 CDROM
+	JR NZ,FixIt
+
+	LD DE,(Buf+#9E) 	;Normal CD-ROM format. Get root dir #
+	LD (Root),DE
+	LD BC,(Buf+#A0)
+	LD (Root+2),BC
+	LD A,0C0h
+	LD (Root+4),A		;Set the SectorNumberValid flag.
+	LD HL,Buf+#28		;Copy Volume_Name to Text area.
+
+Lbl1:	;LD DE,LblTxt
+	;LD BC,32
+	;LDIR
+	RET
+FixIt:	LD DE,(Buf+#B6)
+	LD (Root),DE
+	LD BC,(Buf+#B8)
+	LD (Root+2),BC
+	LD A,0C0h
+	LD (Root+4),A
+	;LD HL,Buf+#30
+	JR Lbl1
+
+;*
+;*  Deals with the SEARCH STRING.
+;*
+
+MakePath:
+	LD DE,#80
+	LD A,(DE)		;How many characters in first parameter ?
+	AND A
+	jr z,Make2
+	INC DE
+	INC DE
+	LD HL,SrchStr
+	LD C,#5c
+	CALL BDOS
+	LD A,B
+Make2:	LD (ParseFl),A
+			;PARSE FLAGS
+	;BIT 0,B	 ;If any chars parsed other than drive name
+	;BIT 1,B	 ;If any directory path specified
+	;BIT 2,B	 ;if drive name specified
+	;BIT 3,B	 ;if main filename specified in last item
+	;BIT 4,B	 ;if filename extension specified in lat item
+	;BIT 5,B	 ;if last item is ambiguous.
+	;BIT 6,B	 ;if last item is "." or ".."
+	;BIT 7,B	 ;if last item is ".."
+
+	LD A,(Root+4)
+	AND 0C0h	;My own personal CDROM changed flag !!! Not nice.
+	CALL Z,FindRot	;Call the FindRoot routine if the sector# isnt valid
+	RET		;or if the Sectorread routine have cleared the bits
+			;to indicate that the CDROM was changed.
+
+Wanted: PUSH BC
+	PUSH DE
+	PUSH HL
+	LD B,11
+	LD HL,Name2
+	LD DE,SrchStr
+WanL1:	LD A,(DE)
+	CP (HL)
+	JR Z,WanL2
+	CP '?'
+	JR Z,WanL2
+	JR WanExit
+WanL2:	INC HL
+	INC DE
+	DJNZ WanL1
+WanExit:POP HL
+	POP DE
+	POP BC
+	RET
+
+RdSec:	LD B,1
+	LD HL,Buf
+	CALL RDCDROM
+	XOR A		;Set Stop mark.
+	LD (Buf+2048),A
+	RET
+
+RDCDROM:
+	LD (Sec1),HL	;Remember which sector is in the buffer.
+	LD A,C
+	LD (Sec1+2),A
+
+	ld	ix,NA_SRB
+
+	ld	a,(ix+01)	; Get CDB 1
+	and	11100000b	; Need LUN only
+	or	c		; Form LUN + MSB
+	ld	(ix+01),a	; MSB
+	ld	(ix+02),d
+	ld	(ix+03),e	; LSB
+	ld	(ix+04),b	; Number of blocks
+
+	xor	a
+	SLA	B		;*2 = 512
+	RLA
+	RL	B		;*4 = 1K
+	RLA
+	RL	B		;*8 = 2K
+	RLA
+	
+	ld	(ix+13),b	; Number of bytes to read Lo
+	ld	(ix+14),a	; Ditto Hi
+
+	ld	a,(ix+18)	; Get Control byte
+	and	11111100b	; Reset BPR
+	or	2
+	ld	(ix+18),a
+
+	ld	de,(aspi)
+	ld	hl,10h
+	add	hl,de
+	ex	de,hl
+	ld	hl,NA_SRB
+	ld	bc,24
+	ldir
+
+	jp	ExeNASPI
+
+NameStr:DB '              ',0
+Name2:	DB '            '
+
+ParseFl:DB 0
+SecCnt: DB 1		;Sectors left in this dir.
+SecL:	DW 0		;Current sector for dir
+SecH:	DW 0
+;Root:	 DW 0
+;	 DW 0
+CurDir: DW 0		;First Sector# for Current dir
+	DW 0
+ParDir: DW 0		;First Sector# for Parent dir
+	DW 0
+SCSISlt:DB 0
+RamSlt: DB 0
+Map:	DB 0
+Last:	DW 0
+	DW 0
+Sec1:	DW 0
+	DW 0
+Delta1: DW 0
+Volume: DS 64,0
+BytesL: DW 0		;Number of bytes in all files.
+	DW 0
+NrFiles:DW 0		;Number of files.
+RJustif:DB 0		;0=Right justify, 1=Left Justify
+SrchStr:DB '???????????',0
+NotFound:DB 'Path not found',#a,#d,'$'
+
+; *** End main
+
+Error:	call	Print
+	ld	c,0
+	jp	BDOS
+
+Print:	ld	a,(hl)
+	and	a
+	ret	z
+	inc	hl
+	push	hl
+	ld	ix,CHPUT
+	call	BIOS
+	pop	hl
+	jr	Print
+BIOS:	ld	iy,(EXPSLT-1)
+	call	CALSLT
+	ret
+NOVAXIS:
+	ld	iy,(data+1-1)
+	jp	CALSLT
+GetNWA:
+	ld	ix,07fech
+	jr	NOVAXIS
+ExeNASPI:
+	ld	ix,07fe9h
+	jr	NOVAXIS
+
+; CHKVER.GEN - Check version of NOVAXIS ROM
+; (C) 1994 KMcs
+; Written by Jurgen Kramer - 16/11/94 -
+; - 11/12/94 -
+; Modified - 04/04/95 -
+
+; Input	: DE = Version number to compare with (eg v0.60 > DE = 0060h)
+;	  A  = Slot ID
+; Output: HL = Found version number
+;         Carry is set when NOVAXIS BIOS version is too old
+
+ChkVer:	push	de
+	ld	h,40h
+	call	024h
+	ld	hl,(NOVAVER)	
+	ld	a,(NOVAREV)
+	push	af
+	push	hl
+	ld	a,(0f342h)
+	ld	h,40h
+	call	024h
+	pop	hl
+	pop	af
+	pop	de
+	cp	CurRev
+	scf
+	ret	nz
+	ld	a,l
+	cp	e
+	jr	z,ChkLo
+	scf
+	ret
+ChkLo:	ld	a,h
+	cp	d
+	scf
+	ret	nz
+	ccf
+	ret
+
+;ChkVer:	push	de
+;	ld	h,40h
+;	call	024h
+;	ld	hl,(NOVAVER)	
+;	push	hl
+;	ld	a,(0f342h)
+;	ld	h,40h
+;	call	024h
+;	pop	hl
+;	pop	de
+;	ld	a,l
+;	sub	e
+;	jr	z,ChkLo
+;	ret
+;ChkLo:	ld	a,h
+;	sub	d
+;	ret
+
+; SRCHROM.ASM - Search for NOVAXIS SCSI BIOS
+; (C) 1994 KMcs
+; Written by Jurgen Kramer - 15/11/94 -
+
+; Modified for NOVAXIS SCSI BIOS search
+; Only searches in page 1 (4000h - 07fffh)
+
+; ROMSEARCH v1.2 (C) 1992 KMcs
+; Written by Jurgen Kramer - 31/05/92
+; (C) 1992 First Class Software
+; Searches for ROM with STATEMENTs (eg. CALL MUSIC)
+; Only for page 1 and 2
+
+; IN     : IX = address of textstring in ROM
+;          IY = address of textstring in RAM -> defb length,'text to search'
+;
+;          HL = Data Field address
+;
+; OUT	: Data Field  (see example)
+;	: Zero Flag is Reset when ROM is found (A = 255)
+;
+; USED   : HL,IX,IY
+;
+; Data Field :  (example)
+;
+;            defb MUSIC   - 255 = ROM FOUND   - 0 = NO ROM FOUND
+;            defb MUS_ID  - slot address ID
+;            defb MUSPRI  - primairy slot
+;            defb MUSSEC  - secondairy slot
+;
+
+SrchROM:
+	push	hl
+        ld	hl,SLTATR+1
+        xor	a
+        ld	b,4
+Loop_2:	push	bc
+        ld	b,4
+Loop_1:	push	bc
+        push	af
+        push	hl
+        set	7,a
+        ld	(ROM_ID),a
+        push	af
+        ld	h,40h
+        pop	af
+        call	ENASLT
+	jr	Start
+
+TeWeg:	pop	hl
+        pop	af
+        add	a,4
+        and	0fh
+	inc	hl
+	inc	hl
+	inc	hl
+	inc	hl
+	pop	bc
+        djnz	Loop_1
+        add	a,1
+        and	00000011b
+        pop	bc
+        djnz	Loop_2
+        xor	a
+        ld	(ROMFND),a
+        jr	Loop_4
+
+Start:	ld	b,(iy+00h)		; Get # of bytes to check    
+
+Loop:	ld	a,(iy+01h)
+        cp	(ix)
+        jr	nz,TeWeg
+        inc	iy
+        inc	ix
+        djnz	Loop
+        pop	hl
+        pop	hl
+        pop	hl
+        pop	hl
+        ld	a,255
+        ld	(ROMFND),a
+
+Loop_4	ld	h,40h
+        ld	a,(RAMAD1)
+        call	ENASLT
+        pop	hl
+        ld	a,(ROMFND)
+        and	a
+	ret	z
+	push	af
+        ld	(hl),a
+        inc	hl
+        ld	a,(ROM_ID)
+        ld	(hl),a
+        inc	hl
+        push	af
+        and	3
+        ld	(hl),a
+        inc	hl
+        pop	af
+        and	12
+        rra
+	rra
+        ld	(hl),a
+	pop	af
+	and	a
+        ret
+
+SCSI_ID:	defb	3,'HD#'
+NOVA_ID:	defb	4,'KMcs'
+
+; Error messages
+
+ErrNoSCSI:	defb	cr,lf,'No SCSI ROM found!',cr,lf,eol
+ErrNoNOVA:	defb	cr,lf,'No NOVAXIS SCSI ROM!',cr,lf,eol
+ErrWrngVr	defb	cr,lf,'Wrong version of NOVAXIS SCSI BIOS',cr,lf,eol
+ErrNoNASPI	defb	cr,lf,'NASPI not installed!',cr,lf,eol
+
+ROMFND:	defb	0
+	defb	0
+ROM_ID:	defb	0
+	defb	0
+data:	defb	0,0,0,0
+
+version:
+	defw	0
+aspi:
+	defw	0
+NA_SRB:
+	defb	8	; CDB 0
+	defb	0	; CDB 1
+	defb	0	; CDB 2
+	defb	0	; CDB 3
+	defb	0	; CDB 4
+	defb	0	; CDB 5
+	defb	0	; CDB 6
+	defb	0	; CDB 7
+	defb	0	; CDB 8
+	defb	0	; CDB 9
+	defb	0	; CDB 10
+	defb	0	; CDB 11
+
+	defb	CDROMID	; Target ID
+	defw	0	; Transfer Length
+	defb	6	; CDB Length
+	defw	Buf	; Pointer to buffer
+	defb	0	; Control
+
+	defb	0	; SCSI Status
+	defb	0	; Target Status
+	defb	0	; Message
+
+	defw	0	; Pointer to Sense-data buffer
+	defb	0	; NASPI Status
+
+Buf:	;DS 2048,0
+
+	end
+
+   rra
+	rra
+        ld	(hl),a
+	pop	af
+	and	a
+        ret
+
+SCSI_ID:	defb	3,'HD#'
+NOVA_ID:	defb	4,'KMcs'
+
+; Error messages
+
+ErrNoSCSI:	defb	cr,lf,'No SCSI ROM found!',cr,lf,eol
+ErrNoNOVA:	defb	cr,lf,'No NOVAXIS SCSI ROM!',cr,lf,eol
+ErrWrngVr	defb	cr,lf,'Wrong version of NOVAXIS SCSI BIOS',cr,lf,eol
+ErrNoNASPI	defb	cr,lf,'NASPI not installed!',cr,lf,eol
+
+ROMFND:	defb	0
+	defb	0
+ROM_ID:	defb	0
+	defb	0
+data:	defb	0,0,0,0
+
+version:
+	defw	0
+aspi:
+	defw	0
+NA_SRB:
+	defb	8	; CDB 0
+	defb	0	; CDB 1
+	defb	0	; CDB 2
+	defb	0	; CDB 3
+	defb	0	; CDB 4
+	defb	0	; CDB 5
+	defb	0	; CDB 6
+	defb	0	; CDB 7
+	defb	0	; CDB 8
+	defb	0	; CDB 9
+	defb	0	; CDB 10
+	defb	0	; CDB 11
+
+	defb	2	; Target ID
+	defw	0	; Transfer Length
+	defb	6	; CDB Length
+	defw	Buf	; Pointer to buffer
+	defb	0	; Control
+
+	defb	0	; SCSI Status
+	defb	0	; Target Status
+	defb	0	; Message
+
+	defw	0	; Pointer to Sense-data buffer
+	defb	0	; NASPI Status
+
+Buf:	;DS 2048,0
+
+	end
+
+        inc	hl
+        pop	af
+        and	12
+        rra
+	rra
+        ld	(hl),a
+	pop	af
+	and	a
+        ret
+
+SCSI_ID:	defb	3,'HD#'
+NOVA_ID:	defb	4,'KMcs'
+
+; Error messages
+
+ErrNoSCSI:	defb	cr,lf,'No SCSI ROM found!',cr,lf,eol
+ErrNoNOVA:	defb	cr,lf,'No NOVAXIS SCSI ROM!',cr,lf,eol
+ErrWrngVr	defb	cr,lf,'Wrong version of NOVAXIS SCSI BIOS',cr,lf,eol
+ErrNoNASPI	defb	cr,lf,'NASPI not installed!',cr,lf,eol
+
+ROMFND:	defb	0
+	defb	0
+ROM_ID:	defb	0
+	defb	0
+data:	defb	0,0,0,0
+
+version:
+	defw	0
+aspi:
+	defw	0
+
+Buf:	;DS 2048,0
+
+	end
+
+and	12
+        rra
+	rra
+        ld	(hl),a
+	pop	af
+	and	a
+        ret
+
+SCSI_ID:	defb	3,'HD#'
+NOVA_ID:	defb	4,'KMcs'
+
+; Error messages
+
+ErrNoSCSI:	defb	cr,lf,'No SCSI ROM found!',cr,lf,eol
+ErrNoNOVA:	defb	cr,lf,'No NOVAXIS SCSI ROM!',cr,lf,eol
+ErrWrngVr	defb	cr,lf,'Wrong version of NOVAXIS SCSI BIOS',cr,lf,eol
+ErrNoNASPI	defb	cr,lf,'NASPI not installed!',cr,lf,eol
+
+ROMFND:	defb	0
+	defb	0
+ROM_ID:	defb	0
+	defb	0
+data:	defb	0,0,0,0
+
+version:
+	defw	0
+aspi:
+	defw	0
+
+Buf:	;DS 2048,0
+
+	end
+

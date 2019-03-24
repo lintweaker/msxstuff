@@ -1,0 +1,762 @@
+; NUTIL.GEN - NOVAXIS UTILility setup
+; (c) 1995 KMcs
+; Written by Jurgen Kramer
+; v0.01 - 05/11/95 -
+; v0.10 - NOVAXIS variable added
+; v0.20 - NASPI variable added
+; v0.30 - NCDROM variable added
+; v0.40 - NSLOT variable added
+; v0.50 - Init text added
+; v0.51 - Modified routine which checks if NOVAXIS is installed. The SrchROM
+; routine always set bit 7 of the slot ID, so if the ROM is in slot 2 it looks
+; if it's a expanded slot 2-0 
+
+
+; v0.52 - 31/08/96 (!) Modified MakeSLT
+
+
+; Sets up the DOS2 environment i.e. sets some environment variables so
+; utilities for NOVAXIS can use these
+; Current generation of utilities can not use them, they all have to be updated
+
+; Environment variables:
+;
+; NOVAXIS=	- Holds NOVAXIS BIOS ver. + rev.
+; NASPI=	- Holds NASPI ver. (0 = not installed)			*
+; NCDROM=       - Holds ID(s) of CDROM(s), (No = No CD-ROM) each ID is 
+;			seperated by a ','. eg 'CDROM=2,4,5'
+; NSLOT=	- Holds slot ID of (1st) NOVAXIS ROM (eg 20 = slot 2-0)
+
+; Variables marked with * are only created when the installed NOVAXIS BIOS
+; supports it's feature which is represented
+
+CurVer:	equ	0001h		; Current NOVAXIS version # 1.00
+
+SCSIROM         equ     07f80h
+NOVAROM         equ     07ff0h
+NOVAVER         equ     07ff5h
+
+GetUnitsOn      equ     07fc8h
+Inquiry         equ     07f92h
+GetNWA		equ	07fech	; Get NASPI Work Area (v1.60.xx and up)
+
+ENASLT	equ	24h
+CALSLT	equ	01ch
+CHPUT	equ	0a2h
+
+EXPSLT	equ	0fcc1h
+SLTATR	equ	0fcc9h
+RAMAD1	equ	0f342h
+$SECBUF equ     0f348h
+
+BDOS	equ	05h
+
+_term0	equ	00h
+_dosver equ     6fh
+_genv   equ     6bh
+_senv   equ     6ch
+_fenv   equ     6dh
+_term	equ	62h
+
+cr	equ	0dh
+lf	equ	0ah
+eol	equ	0
+
+
+ID	equ	0adh		; Change to your ID
+VERHI	equ	00h		; High part of version (0-9)
+VERLO	equ	52h		; Low part of version
+
+	org	0100h
+
+	jp	begin
+
+	defb	'NOVAXIS'
+	defb	ID			; ID for NUTIL
+	defb	VERHI,VERLO		; NUTIL version 0.52 
+	defb	'EUR'			; Landcode: Europe
+	defb	01h,00h			; Works with NOVAXIS version 1.00
+	defb	0,0			; Does not NEED NUTIL (of course!)
+	defb	0,0			; Does not need NASPI
+	defw	0,0,0,0			; Reserved
+	defw	0,0			; Reserved
+
+begin:	ld	ix,SCSIROM		; Check for SCSI ROM
+	ld	iy,SCSI_ID
+	ld	hl,data
+	call	SrchROM
+	ld	hl,ErrNoSCSI
+	jp	z,Error
+
+	ld	ix,NOVAROM		; Check for NOVAXIS ROM
+	ld	iy,NOVA_ID
+	ld	hl,data
+	call	SrchROM
+	ld	hl,ErrNoNOVA
+	jp	z,Error
+
+	ld	a,(data+1)		; Check NOVAXIS version #
+	ld	de,CurVer
+	call	ChkVer
+	ld	(version),hl		; Save NOVAXIS version #
+	ld	hl,ErrWrngVr
+	jp	c,Error
+
+; Check DOS version, DOS2 or up is needed
+
+        ld      c,_dosver
+	call	BDOS
+        ld      hl,ErrNoDOS
+        and     a               ; MSX-DOS ?
+        jp      nz,Error        ; No
+        ld      hl,ErrDOS
+        ld      a,b
+        cp      2               ; MSX-DOS 2 or up ?
+        jp      c,Error         ; No
+
+; Check if NOVAXIS is installed
+
+        ld      hl,0fb20h
+        ld      de,ErrNotIns
+        ld      b,4
+        ld      a,(data+1)      ; Get NOVAXIS slot ID
+	and	01111111b
+ChkNOV: ld	c,(hl)
+	res	7,c
+	cp	c
+        jr      z,NOVIns
+        inc     hl
+        inc     hl
+        djnz    ChkNOV
+        ex      de,hl
+        jp      Error
+
+; *** Main
+
+NOVIns: ld	hl,IniTxt
+	call	Print
+
+	ld      hl,BI_Table
+        call    BuildInfo       ; Build Info table
+
+        ld      iy,BI_Table
+        ld      a,(iy+09h)      ; Get NOVAXIS version # Lo
+        and     a               ; Version 1.00 ?
+        jr      z,ver1_00
+        and     11110000b       ; Version 1.5x ?
+        jr      z,ver1_5x
+
+; Version 1.6x
+
+	xor	a
+	ld	(RevFlag),a	; Set Revision Flag (0 = yes)
+	call	MakeVer		; Make version string
+
+	ld      hl,NOV_ENV
+	call	SetEnv		; Set environment var. 'NOVAXIS'        
+	
+	call	MakeNVer	; Make NASPI version string
+	
+	ld	hl,NAS_ENV
+	call	SetEnv		; Set environment var. 'NASPI'
+
+	jr      Common        
+
+; Version 1.5x
+
+ver1_5x:
+	ld	de,EnvBuff
+	xor	a
+	ld	(RevFlag),a	; Set Revision Flag (0 = yes)
+	call	MakeVer		; Make version string
+
+        ld      hl,NOV_ENV
+	call	SetEnv		; Set Enviroment string 'NOVAXIS'        
+	
+	jr	Common
+ 
+; Version 1.00
+
+ver1_00:
+	ld	de,EnvBuff
+	ld	a,1
+	ld	(RevFlag),a	; Set Revision Flag (0 = yes)
+	call	MakeVer		; Make version string
+
+        ld      hl,NOV_ENV
+	call	SetEnv		; Set enviroment var. 'NOVAXIS'        
+
+Common:	call	MakeCDROM	; Make CDROM string
+	
+	ld	hl,CDR_ENV
+	call	SetEnv		; Set env. var. 'CDROM'
+
+	call	MakeSLT		; Make slot id string
+
+	ld	hl,SLT_ENV
+	call	SetEnv		; Set env. var. 'NSLOT'
+
+; Print done text
+
+	ld	hl,DoneTxt
+	call	Print
+; Exit
+	ld      c,_term
+        ld	b,0		; No error
+	jp      BDOS
+
+; *** End main
+
+Error:	call	Print
+	ld	c,_term0
+	jp	BDOS
+
+Print:	ld	a,(hl)
+	and	a
+	ret	z
+	inc	hl
+	push	hl
+	ld	ix,CHPUT
+	call	BIOS
+	pop	hl
+	jr	Print
+BIOS:	ld	iy,(EXPSLT-1)
+	call	CALSLT
+	ret
+NOVAXIS:
+	ld	iy,(data+1-1)
+	jp	CALSLT
+
+; BuildInfo - Build Info table
+; Input : HL = Table address
+; Ouput :
+; Modify:
+
+BuildInfo:
+	ld	(TableAdd),hl
+        ld      ix,GetUnitsOn
+        call    NOVAXIS
+        ld      (hl),a
+        inc     hl
+        ld      (hl),c
+        inc     hl
+        ld      (hl),d
+        inc     hl
+        push    hl
+        ld      a,(data+1)
+        ld      h,40h
+        call    ENASLT
+        pop     de
+        ld      hl,07ff0h       ; Start of NOVAXIS Info Block
+        ld      bc,16
+        ldir
+  	push	de
+	ld      a,(RAMAD1)
+        ld      h,40h
+        call    ENASLT
+        pop     hl
+        push    hl
+        ld      (hl),255
+        ld      d,h
+        ld      e,l
+        inc     de
+        ld      bc,7
+        ldir                    ; Invalidate all IDs
+        pop     hl
+        call    FillIDs
+
+	ld	hl,(TableAdd)
+	ld	de,13h
+	add	hl,de
+	ld	e,0		; 0 CD-ROMs
+	ld	b,8		; Eight devices to check
+	ld	a,5		; Code for CD-ROM
+CntCDR:	cp	(hl)		; Device is a CD-ROM ?
+	jr	nz,NoDev5
+	inc	e
+NoDev5:	inc	hl
+	djnz	CntCDR
+  	ld	a,e
+	ld	(cdroms),a
+	ret
+
+; BuildInfo table layout:
+; A value of 0ffh indicates Not Valid (except for ID vector)
+;
+; +00h          - Number of Units online
+; +01h          - ID Vector
+; +02h          - Host ID
+; +03h - 12h    - NOVAXIS Info Block (copied from ROM)
+
+;   03h       * NOVAVAXIS ROM ID     - 'KMcs'
+;   07h       * ROM type             - 0=MSX2, 1=Turbo-R, 2=MSX2/Turbo-R
+;   08h       * Version # Hi         - (BCD)
+;   09h       * Version # Lo         - (PBCD)
+;   0ah       * Default Host ID      - b0h = 7, b1h = 6 etc.
+;   0bh       * Base I/O             - 24h, 34h etc.
+;   0ch       * ROM Revision level   - (PBCD)      (not in version 1.00)
+;   0dh       * NASPI version # Hi   - (BCD) (only v1.6x.xx and up)
+;   0eh       * NASPI version # Lo   - (PBCD) (only v1.6x.xx and up)
+;   0fh - 12h * Reserved (00h)
+
+; +13h - 1ah    - Unit ID Table:
+; Device type 00h - 09h, 0ffh = invalid, 0feh = Host
+;   13h       * Device type ID 0
+;   14h       *             ID 1
+;   15h       *             ID 2
+;   16h       *             ID 3
+;   17h       *             ID 4
+;   18h       *             ID 5
+;   19h       *             ID 6
+;   1ah       *             ID 7
+
+; FillIDs - Fill in Device Types
+; Input : HL = Build Info Table +14h
+; Output: -
+; Modify: AF,BC,DE,HL,IX,IY
+
+FillIDs:
+        ld      iy,BI_Table
+        ld      d,0             ; Start with ID 0
+        ld      e,(iy+01h)      ; Get ID Vector
+        ld      c,(iy+02h)      ; Host ID
+        ld      b,8             ; Max eight devices
+
+NxtDev: srl     e
+        jr      c,DevOk
+        cp      c               ; Host ?
+        jr      nz,DevNt1
+        dec     (hl)
+        jr      DevNt1
+
+DevOk:  push    bc
+        push    de
+        push    hl
+        ld      a,d
+        ld      hl,($SECBUF)
+        ld      ix,Inquiry
+        call    NOVAXIS
+        pop     hl
+        inc     d
+        dec     d               ; Status GOOD ?
+        jr      nz,DevNt2
+        pop     de
+        pop     bc
+        ld      ix,($SECBUF)
+        ld      a,(ix+00h)
+        and     00011111b       ; Extract device type
+        cp      10h             ; Unknown or illegal device type ?
+        jr      nc,DevNt1
+        ld      (hl),a          ; Store Device Type
+        jr      DevNt1
+        
+DevNt2: pop     de
+        pop     bc
+DevNt1:
+        inc     a               ; Next Device
+	inc	d
+        inc     hl
+        djnz    NxtDev
+        ret
+
+; SetEnv - Set Environment variable
+; Input	: HL = ASCIIZ name string
+; Output: A = Error
+; Modify:
+
+SetEnv:	push	iy
+	ld	de,EnvBuff
+	ld	c,_senv
+	call	BDOS
+	pop	iy
+	ret
+
+; MakeVer - Make Version string
+; Input	: IY = address of BI_Table
+; Output: 
+; Modify:
+
+MakeVer:
+	ld	a,(iy+08h)	; Get version # Hi
+	call	CnvBCD
+	ld	hl,EnvBuff
+	ld	(hl),a		; Store 2nd digit only
+	inc	hl
+	ld	(hl),'.'
+	inc	hl
+	ld	a,(iy+09h)	; Get version # Lo
+	call	CnvBCD
+	ld	(hl),d
+	inc	hl
+	ld	(hl),a
+	inc	hl
+	xor	a
+	ld	(hl),a
+	ld	a,(RevFlag)
+	and	a
+	ret	nz
+	ld	(hl),'.'
+	inc	hl
+	ld	a,(iy+0ch)	; Get revision level
+	call	CnvBCD
+	ld	(hl),d
+	inc	hl
+	ld	(hl),a
+	ret
+
+; MakeNVer - Make NASPI Version string
+; Input	: IY = address of BI_Table
+; Output:
+; Modify:
+
+MakeNVer:
+	ld	hl,EnvBuff
+	push	hl
+	push	iy
+	ld	ix,GetNWA
+	call	NOVAXIS
+	pop	iy
+	pop	hl
+	ld	a,'0'
+	jr	c,NASDis	; NASPI Disabled
+
+	ld	a,(iy+0dh)	; Get NASPI version #, Hi
+	call	CnvBCD
+	ld	(hl),a		; Only store 2nd digit
+	inc	hl
+	ld	(hl),'.'
+	inc	hl
+	ld	a,(iy+0eh)	; Get NASPI version #, Lo
+	call	CnvBCD
+	ld	(hl),d
+	inc	hl
+NASDis:	ld	(hl),a
+	inc	hl
+	ld	(hl),0
+	ret
+
+; MakeCDROM - Make CDROM string
+; Input	: IY = BI_Table
+; Output: 
+; Modify:
+
+MakeCDROM:
+	ld	hl,EnvBuff
+	ld	a,(cdroms)
+	and	a		; Are there CD-ROMs online ?
+	jr	nz,CDok
+	ld	(hl),'n'
+	inc	hl
+	ld	(hl),'o'
+	inc	hl
+	jr	NoMoreCD
+	
+CDok:	ld	de,13h
+	add	iy,de
+	ld	bc,0800h
+	ld	d,a
+NxtDevCD:
+	ld	a,(iy+00h)	; Get device type
+	cp	5		; CD-ROM ?
+	jr	nz,NoCDR
+	ld	a,c
+	add	a,30h	
+	ld	(hl),a
+	inc	hl
+	dec	c		; More CD-ROMs ?
+	jr	nz,NoMoreCD
+	ld	(hl),','
+	inc	hl
+NoCDR:	inc	c
+	inc	iy
+	djnz	NxtDevCD
+NoMoreCD:
+	ld	(hl),0
+	ret
+
+; MakeSLT - Make NOVAXIS SLOT ID string
+; Input	: -
+; Output: -
+; Modify: AF,B,D,HL
+
+MakeSLT:
+	ld	hl,EnvBuff
+	ld	a,(data+1)	; Get slot ID
+	call	CnvHEX
+	ld	(hl),d
+	inc	hl
+	ld	(hl),a
+	inc	hl
+	ld	(hl),0
+	ret
+
+; CnvBCD - Convert byte to ASCII
+; Input	: A = BCD
+; Output: D = 1st digit, A = 2nd
+; Modify: F,B
+
+CnvBCD:
+	ld	b,a
+	and	11110000b
+	rlca
+	rlca
+	rlca
+	rlca
+	add	a,30h
+	ld	d,a
+	ld	a,b
+	and	00001111b
+	add	a,30h
+	ret
+
+; CnvHEX - Convert byte to HEX (ASCII)
+; Input	: A = HEX byte
+; Output: D = 1st digit, A = 2nd
+; Modify: F,B
+
+CnvHEX:
+	ld	b,a
+	and	11110000b
+	rlca
+	rlca
+	rlca
+	rlca
+	add	a,30h
+	cp	3ah		; > 9 ?
+	jr	c,NoHex
+	add	a,7
+NoHex:	ld	d,a
+	ld	a,b
+	and	00001111b
+	add	a,30h
+	cp	3ah
+	ret	c
+	add	a,7
+	ret
+
+; CHKVER.GEN - Check version of NOVAXIS ROM
+; (C) 1994 KMcs
+; Written by Jurgen Kramer - 16/11/94 -
+; - 11/12/94 -
+; Modified - 04/04/95 -
+
+; Input	: DE = Version number to compare with (eg v0.60 > DE = 0060h)
+;	  A  = Slot ID
+; Output: HL = Found version number
+;         Carry is set when NOVAXIS BIOS version is too old
+
+ChkVer:	push	de
+	ld	h,40h
+	call	024h
+	ld	hl,(NOVAVER)	
+	push	hl
+	ld	a,(0f342h)
+	ld	h,40h
+	call	024h
+	pop	hl
+	pop	de
+	ld	a,l
+	sub	e
+	jr	z,ChkLo
+	ret
+ChkLo:	ld	a,h
+	sub	d
+	ret
+
+; SRCHROM.ASM - Search for NOVAXIS SCSI BIOS
+; (C) 1994 KMcs
+; Written by Jurgen Kramer - 15/11/94 -
+
+; Modified for NOVAXIS SCSI BIOS search
+; Only searches in page 1 (4000h - 07fffh)
+
+; ROMSEARCH v1.2 (C) 1992 KMcs
+; Written by Jurgen Kramer - 31/05/92
+; (C) 1992 First Class Software
+; Searches for ROM with STATEMENTs (eg. CALL MUSIC)
+; Only for page 1 and 2
+
+; IN     : IX = address of textstring in ROM
+;          IY = address of textstring in RAM -> defb length,'text to search'
+;
+;          HL = Data Field address
+;
+; OUT	: Data Field  (see example)
+;	: Zero Flag is Reset when ROM is found (A = 255)
+;
+; USED   : HL,IX,IY
+;
+; Data Field :  (example)
+;
+;            defb MUSIC   - 255 = ROM FOUND   - 0 = NO ROM FOUND
+;            defb MUS_ID  - slot address ID
+;            defb MUSPRI  - primairy slot
+;            defb MUSSEC  - secondairy slot
+;
+
+SrchROM:
+	push	hl
+        ld	hl,SLTATR+1
+        xor	a
+        ld	b,4
+Loop_2:	push	bc
+        ld	b,4
+Loop_1:	push	bc
+        push	af
+        push	hl
+        set	7,a
+        ld	(ROM_ID),a
+        push	af
+        ld	h,40h
+        pop	af
+        call	ENASLT
+	jr	Start
+
+TeWeg:	pop	hl
+        pop	af
+        add	a,4
+        and	0fh
+	inc	hl
+	inc	hl
+	inc	hl
+	inc	hl
+	pop	bc
+        djnz	Loop_1
+        add	a,1
+        and	00000011b
+        pop	bc
+        djnz	Loop_2
+        xor	a
+        ld	(ROMFND),a
+        jr	Loop_4
+
+Start:	ld	b,(iy+00h)		; Get # of bytes to check    
+
+Loop:	ld	a,(iy+01h)
+        cp	(ix)
+        jr	nz,TeWeg
+        inc	iy
+        inc	ix
+        djnz	Loop
+        pop	hl
+        pop	hl
+        pop	hl
+        pop	hl
+        ld	a,255
+        ld	(ROMFND),a
+
+Loop_4	ld	h,40h
+        ld	a,(RAMAD1)
+        call	ENASLT
+        pop	hl
+        ld	a,(ROMFND)
+        and	a
+	ret	z
+	push	af
+        ld	(hl),a
+        inc	hl
+        ld	a,(ROM_ID)
+        ld	(hl),a
+        inc	hl
+        push	af
+        and	3
+        ld	(hl),a
+        inc	hl
+        pop	af
+        and	12
+        rra
+	rra
+        ld	(hl),a
+	pop	af
+	and	a
+        ret
+
+SCSI_ID:	defb	3,'HD#'
+NOVA_ID:	defb	4,'KMcs'
+
+
+; Messages
+
+IniTxt:	defb	cr,lf,'NOVAXIS NUTIL version 0.52 (c) 1995-1996 KMcs',cr,lf
+	defb	'Written by Jurgen Kramer - 31/08/96 -',cr,lf
+	defb	cr,lf,'Setting environment variables for NOVAXIS utilities'
+	defb	'...',cr,lf,cr,lf,eol
+DoneTxt:
+	defb	'Done...',cr,lf,cr,lf,eol
+
+; Error messages
+
+ErrNoSCSI:	defb	cr,lf,'No SCSI ROM found!',cr,lf,eol
+ErrNoNOVA:	defb	cr,lf,'No NOVAXIS SCSI ROM!',cr,lf,eol
+ErrWrngVr	defb	cr,lf,'Wrong version of NOVAXIS SCSI BIOS',cr,lf,eol
+ErrDOS          defb    cr,lf,'This program requires MSX-DOS2',cr,lf,eol
+ErrNoDOS        defb    cr,lf,'No MSX-DOS found',cr,lf,eol
+ErrNotIns       defb    cr,lf,'NOVAXIS is not installed',cr,lf,eol
+
+ROMFND:	defb	0
+	defb	0
+ROM_ID:	defb	0
+	defb	0
+data:	defb	0,0,0,0
+
+version:
+	defw	0
+
+NOV_ENV:	defb    'NOVAXIS',0
+NAS_ENV:	defb	'NASPI',0
+CDR_ENV:	defb	'NCDROM',0
+SLT_ENV:	defb	'NSLOT',0
+
+TableAdd:	defw	0
+RevFlag:	defb	255
+cdroms:		defb	0
+
+BI_Table:	defs	30,0
+EnvBuff:	defs	255,0
+
+        end
+
+,0
+
+        end
+
+defs	255,0
+
+        end
+
+0
+EnvBuff:	defs	255,0
+
+        end
+
+,'No SCSI ROM found!',cr,lf,eol
+ErrNoNOVA:	defb	cr,lf,'No NOVAXIS SCSI ROM!',cr,lf,eol
+ErrWrngVr	defb	cr,lf,'Wrong version of NOVAXIS SCSI BIOS',cr,lf,eol
+ErrDOS          defb    cr,lf,'This program requires MSX-DOS2',cr,lf,eol
+ErrNoDOS        defb    cr,lf,'No MSX-DOS found',cr,lf,eol
+ErrNotIns       defb    cr,lf,'NOVAXIS is not installed',cr,lf,eol
+
+ROMFND:	defb	0
+	defb	0
+ROM_ID:	defb	0
+	defb	0
+data:	defb	0,0,0,0
+
+version:
+	defw	0
+
+NOV_ENV:	defb    'NOVAXIS',0
+NAS_ENV:	defb	'NASPI',0
+CDR_ENV:	defb	'NCDROM',0
+SLT_ENV:	defb	'NSLOT',0
+
+TableAdd:	defw	0
+RevFlag:	defb	255
+cdroms:		defb	0
+
+BI_Table:	defs	30,0
+EnvBuff:	defs	255,0
+
+        end
+
+
