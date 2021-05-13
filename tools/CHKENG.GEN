@@ -1,0 +1,347 @@
+; chkeng.com
+; Check for Yahama S3527 / S1985 MSX engine
+; both 'feature' port mirroring of the VDP, PSG, PPI I/O ports.
+; S1985 also has mirroring for the RTC
+; this can be used to detect the presence of either engine or lack thereof
+; v0.2 13-May-2021 Jurgen Kramer
+
+BDOS	equ 00005h
+RDSLT	equ 0000ch
+CALSLT	equ 0001ch
+
+EXPTBL	equ 0fcc1h
+
+CR	equ 0dh
+LF	equ 0ah
+EOL	equ "$"
+
+; S3527 / S1985 functions and there normal and mirrored IO ports
+;               normal:   mirorred: 
+; Printer port: 90-91h -> 94-95h - Not (fully) for S1985
+; VDP         : 98-9bh -> 9c-9f
+; PSG         : a0-a3h -> a4-a7h
+; PPI         : a8-abh -> ac-afh
+; RTC         : b4-b5h -> b6-b7h - S1985 only
+
+	org 0100h
+
+	ld de,txt_init
+	call print
+
+	; Check MSX type, only execute test on MSX2 and 2+
+
+	ld a,(EXPTBL)
+	ld hl,002dh
+	ld ix,RDSLT
+	call bios
+
+	ld de,txt_noturbor
+	cp 3		; Not for Turbo-R
+	jp z,unknown
+	jp nc,unknown	; Or higher
+
+	; Execute mirror checks
+
+	call tst_psg
+	call tst_printer
+	call tst_rtc
+	call tst_ppi
+
+	di
+	call tst_vdp
+	ei
+
+	; Print mirror check results
+
+	ld de,txt_prt
+	call print
+	ld a,(prt_mirror)
+	call yesno
+
+	ld de,txt_psg
+	call print
+	ld a,(psg_mirror)
+	call yesno
+
+	ld de,txt_ppi
+	call print
+	ld a,(ppi_mirror)
+	call yesno
+
+	ld de,txt_vdp
+	call print
+	ld a,(vdp_mirror)
+	call yesno
+
+	ld de,txt_rtc
+	call print
+	ld a,(rtc_mirror)
+	call yesno
+
+	; Print conclusion
+
+	ld de,txt_conclusion
+	call print
+	ld de,txt_unknown
+	ld a,(mirror_cnt)
+	cp 4			; Need at least the PSG,PPI,Printer and VDP port				; mirroring
+	jr c,unknown		; To few mirrors found
+
+	ld de,txt_eng_det
+	call print
+
+	; Now its either a S3527 or a S1985, do the S1895 check
+
+	call s1985
+	ld de,txt_s1985
+	jr c,unknown		; It's a S1985
+	ld de,txt_s3527
+
+unknown:
+	call print
+
+	ld c,0
+	jp BDOS
+
+
+bios:
+	ld iy,(EXPTBL-1)
+	jp CALSLT
+
+print:
+	ld c,9
+	jp BDOS
+
+tst_psg:
+	ld c,0a0h	; PSG register write port
+	call do_psg_tst
+	ret nz		; No PSG
+	ld c,0a4h 	; mirror PSG write port
+
+do_psg_tst:
+	xor a
+	out (c),a	; Select register 0
+	inc c
+	ld a,21h
+	out (c),a	; Write to register
+	ld b,a
+	inc c
+	in a,(c)	; Read it back
+	cp b
+	ret nz		; No match (no PSG)
+	ld a,255
+	ld (psg_mirror),a
+	ret
+
+tst_vdp:
+	ld hl,0
+	call vdpswr	; Set VDP for writing to VRAM
+	ld hl,txt_test
+	call vdpprint
+
+	ld hl,0
+	call vdpsrd	; Set VDP for reading from VRAM
+	ld hl,txt_test
+	call dovread
+	ret nz
+
+	ld hl,0
+	call vdpsrd_m	; Set VDP to read from VRAM through mirror port
+	ld hl,txt_test
+
+	call dovread
+	ret nz
+	ld a,255
+	ld (vdp_mirror),a
+	ret
+
+dovread:
+	ld a,(hl)
+	ld b,a		; # of bytes
+	inc hl
+rdtst:
+	in a,(c)
+	cp (hl)
+	ret nz		; Mismatch
+	inc hl
+	djnz rdtst
+	ret
+
+vdpprint:
+	ld a,(hl)
+	ld b,a		; # bytes to print
+	inc hl
+prloop:
+	outi
+	jp nz,prloop 
+	ret
+
+; tst_printer
+; [SIMPLE] check for printer I/O port mirroring
+; Note: On S3527, port 91h give non ffh results but on S1985 ffh is returned
+;       (no printer connected)
+
+tst_printer:
+	in a,(090h)
+	ld b,a
+	inc a
+	ret z		; Return if port reads 0ffh		
+	in a,(092h)	; Read mirror port
+	cp b
+	ret nz		; No mirror
+
+; S1985 returns ffh on 91h while the S3527 does not
+; It seems the S1985 does not (fully) has port mirroring for the printer
+; port
+
+	in a,(091h)
+	ld b,a
+	in a,(093h)
+	cp b
+	ret nz
+	ld a,255	; Indicate printer port mirroring
+	ld (prt_mirror),a
+	ret
+
+; tst_rtc
+; [SIMPLE] check for RTC I/O port mirroring
+; Probably need to replace this with real nibble read from the clock
+
+tst_rtc:
+	in a,(0b5h)
+	ld b,a
+	inc a
+	ret z
+	in a,(0b7h)
+	cp b
+	ret nz
+	ld a,255
+	ld (rtc_mirror),a
+	ret
+
+; tst_ppi
+; [SIMPLE] check for PPI I/O port mirroring
+
+tst_ppi:
+	in a,(0a8h)
+	ld b,a
+	inc a
+	ret z
+	in a,(0ach)
+	cp b
+	ret nz
+	ld a,255
+	ld (ppi_mirror),a
+	ret
+
+; vdpswr_m
+; Set VDP for VRAM write through/on mirror ports
+vdpswr_m:
+	ld bc,0409dh
+	jr do_vdpset
+
+; vdpswr
+; Set VDP for VRAM write
+
+vdpswr:
+	ld bc,04099h
+do_vdpset:
+	xor a		; Default to lower half of VRAM
+	rlc h
+	rla
+	rlc h
+	rla
+	srl h
+	srl h
+	out (c),a
+	ld a,14 .or. 128
+	out (c),a
+	ld a,l
+	nop
+	out (c),a
+	ld a,h
+	or b		; Indicate VRAM read or write
+	out (c),a
+	dec c		; Return VRAM read/write port
+	ret
+
+vdpsrd_m:
+	ld bc,0009dh
+	jr do_vdpset
+vdpsrd:
+	ld bc,00099h
+	jr do_vdpset
+
+yesno:
+	ld de,txt_yes
+	inc a
+	jr nz,dono
+	ld a,(mirror_cnt)
+	inc a
+	ld (mirror_cnt),a
+	jp print
+dono:
+	ld de,txt_no
+	jp print
+
+; s1985
+; Check for S1985 SRAM via switched I/O ports
+; Output: Cy = 0 when no SRAM function found
+;         Cy = 1 when SRAM found
+
+s1985:
+	ld a,0feh	; ID
+	out (040h),a
+	cpl
+	ld b,a
+	in a,(040h)
+	cp b		; ID match?
+	push af
+	xor a
+	out (040h),a	; Disable switched IO ports
+	pop af
+	scf
+	ret z		; S1985 found
+	and a
+	ret
+
+mirror_cnt: db 0
+
+vdp_mirror: db 0
+psg_mirror: db 0
+rtc_mirror: db 0
+prt_mirror: db 0
+ppi_mirror: db 0
+
+txt_test:
+	db 19
+txt_init:
+	db "S3527 / S1985 MSX Engine detector",CR,LF
+	db "v0.2 13-May-2021 Jurgen Kramer",CR,LF,CR,LF,CR,LF,EOL
+txt_conclusion:
+	db CR,LF,"Conclusion: ",CR,LF,EOL
+txt_s3527:
+	db "S3527",CR,LF,EOL
+txt_s1985:
+        db "S1985",CR,LF,EOL
+txt_unknown:
+	db "Unknown or no engine",CR,LF,EOL
+txt_eng_det:
+	db "Engine detected : $"
+txt_prt:
+	db "Print ports (90-91h) mirrored : $"
+txt_psg:
+	db "PSG ports (a0-a3h) mirrored   : $"
+txt_ppi:
+	db "PPI ports (a8-abh) mirrored   : $"
+txt_vdp:
+	db "VDP ports (98-9bh) mirrored   : $"
+txt_rtc:
+	db "RTC ports (b4-b5h) mirrored   : $"
+txt_no:
+	db "No",CR,LF,"$"
+txt_yes:
+	db "Yes",CR,LF,"$"
+txt_noturbor:
+	db "No need to run this on a Turbo-R",CR,LF,EOL
+
