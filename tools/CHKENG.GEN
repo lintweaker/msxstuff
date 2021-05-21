@@ -9,6 +9,8 @@
 ; - Show IO port # of mirrored ports
 ; - PSG check improved
 ; - Allow to run on Turbo-R
+; v0.42
+; - Report ports returning 255 for Printer, PSG,PPI and RTC
 
 BDOS	equ 00005h
 RDSLT	equ 0000ch
@@ -136,7 +138,12 @@ print:
 tst_psg:
 	ld c,0a0h	; PSG register normal write port
 	call do_npsg_tst
-	ret nz		; No PSG
+	jr z,tst_psg_m
+	ld a,1
+	ld (psg_mirror),a
+	ret		; No PSG
+
+tst_psg_m:
 	ld c,0a4h 	; mirror PSG write port
 	xor a
 	out (c),a	; Select register 0
@@ -144,7 +151,7 @@ tst_psg:
 	inc c
 	in a,(c)	; Read register through mirror port
 	cp 21h
-	ret nz
+	ret nz		; No mirror
 	ld a,255
 	ld (psg_mirror),a
 	ret
@@ -213,7 +220,11 @@ tst_printer:
 	in a,(090h)
 	ld b,a
 	inc a
-	ret z		; Return if port reads 0ffh		
+	jr nz,tst_prt
+	ld a,1
+	ld (prt_mirror),a	; Port reads 0ffh
+	ret
+tst_prt:	
 	in a,(092h)	; Read mirror port
 	cp b
 	ret nz		; No mirror
@@ -239,7 +250,11 @@ tst_rtc:
 	in a,(0b5h)
 	ld b,a
 	inc a
-	ret z
+	jr nz,do_rtc
+	ld a,1
+	ld (rtc_mirror),a
+	ret
+do_rtc:
 	in a,(0b7h)
 	cp b
 	ret nz
@@ -254,7 +269,12 @@ tst_ppi:
 	in a,(0a8h)
 	ld b,a
 	inc a
-	ret z
+	jr nz,do_ppi
+	ld a,1
+	ld (ppi_mirror),a
+	ret
+
+do_ppi:
 	in a,(0ach)
 	cp b
 	ret nz
@@ -300,16 +320,24 @@ vdpsrd:
 	ld bc,00099h
 	jr do_vdpset
 
+; yesno
+; Print Yes, No or 0ffh
+; 255 = Yes, 0 = No, 1 = 0ffh
+
 yesno:
 	ld de,txt_yes
 	inc a
-	jr nz,dono
+	jr z,doyes
+	ld de,txt_no
+	dec a
+	jp z,print
+	ld de,txt_ffh
+	jp print
+
+doyes:
 	ld a,(mirror_cnt)
 	inc a
 	ld (mirror_cnt),a
-	jp print
-dono:
-	ld de,txt_no
 	jp print
 
 ; s1985
@@ -369,7 +397,8 @@ txt_test:
 	db 19
 txt_init:
 	db "S3527 / S1985 MSX Engine / mirror IO port detector",CR,LF
-	db "v0.4 21-May-2021 Jurgen Kramer",CR,LF,CR,LF,CR,LF,EOL
+	db "v0.42 21-May-2021 Jurgen Kramer",CR,LF,CR,LF,CR,LF
+	db "Note: ports returning 0ffh cannot be tested",CR,LF,CR,LF,EOL
 txt_conclusion:
 	db CR,LF,"Conclusion: ",CR,LF,EOL
 txt_s3527:
@@ -396,6 +425,8 @@ txt_no:
 	db "No",CR,LF,"$"
 txt_yes:
 	db "Yes",CR,LF,"$"
+txt_ffh:
+	db "ffh",CR,LF,"$"
 txt_noturbor:
 	db "No need to run this on a Turbo-R",CR,LF,EOL
 
