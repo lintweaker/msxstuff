@@ -4,11 +4,22 @@
 ; S1985 also has mirroring for the RTC
 ; this can be used to detect the presence of either engine or lack thereof
 ; v0.2 13-May-2021 Jurgen Kramer
+; v0.4 21-May-2021 Jurgen Kramer
+; - VDP test: text outside of screen
+; - Show IO port # of mirrored ports
+; - PSG check improved
+; - Allow to run on Turbo-R
 
 BDOS	equ 00005h
 RDSLT	equ 0000ch
 CALSLT	equ 0001ch
+CHGMOD	equ 0005fh
 
+
+LINL40	equ 0f3aeh
+LINL32	equ 0f3afh
+LINLEN	equ 0f3b0h
+SCRMOD	equ 0fcafh
 EXPTBL	equ 0fcc1h
 
 CR	equ 0dh
@@ -25,6 +36,8 @@ EOL	equ "$"
 
 	org 0100h
 
+	call calc_screen
+
 	ld de,txt_init
 	call print
 
@@ -35,10 +48,12 @@ EOL	equ "$"
 	ld ix,RDSLT
 	call bios
 
-	ld de,txt_noturbor
-	cp 3		; Not for Turbo-R
-	jp z,unknown
-	jp nc,unknown	; Or higher
+	ld (msxtype),a
+
+;	ld de,txt_noturbor
+;	cp 3		; Not for Turbo-R
+;	jp z,unknown
+;	jp nc,unknown	; Or higher
 
 	; Execute mirror checks
 
@@ -82,6 +97,12 @@ EOL	equ "$"
 
 	ld de,txt_conclusion
 	call print
+
+	ld de,txt_s1990
+	ld a,(msxtype)
+	cp 3
+	jr z,unknown
+
 	ld de,txt_unknown
 	ld a,(mirror_cnt)
 	cp 4			; Need at least the PSG,PPI,Printer and VDP port				; mirroring
@@ -113,12 +134,22 @@ print:
 	jp BDOS
 
 tst_psg:
-	ld c,0a0h	; PSG register write port
-	call do_psg_tst
+	ld c,0a0h	; PSG register normal write port
+	call do_npsg_tst
 	ret nz		; No PSG
 	ld c,0a4h 	; mirror PSG write port
+	xor a
+	out (c),a	; Select register 0
+	inc c
+	inc c
+	in a,(c)	; Read register through mirror port
+	cp 21h
+	ret nz
+	ld a,255
+	ld (psg_mirror),a
+	ret
 
-do_psg_tst:
+do_npsg_tst:
 	xor a
 	out (c),a	; Select register 0
 	inc c
@@ -128,24 +159,21 @@ do_psg_tst:
 	inc c
 	in a,(c)	; Read it back
 	cp b
-	ret nz		; No match (no PSG)
-	ld a,255
-	ld (psg_mirror),a
 	ret
 
 tst_vdp:
-	ld hl,0
+	ld hl,(line)
 	call vdpswr	; Set VDP for writing to VRAM
 	ld hl,txt_test
 	call vdpprint
 
-	ld hl,0
+	ld hl,(line)
 	call vdpsrd	; Set VDP for reading from VRAM
 	ld hl,txt_test
 	call dovread
 	ret nz
 
-	ld hl,0
+	ld hl,(line)
 	call vdpsrd_m	; Set VDP to read from VRAM through mirror port
 	ld hl,txt_test
 
@@ -305,8 +333,32 @@ s1985:
 	and a
 	ret
 
-mirror_cnt: db 0
+; Calcalute line nr outside of the current screen
 
+calc_screen:
+	ld a,(LINL40)
+	ld b,a
+	ld a,(SCRMOD)
+	or a		; Screen 0?
+	jr z,screenok
+	ld a,(LINL32)
+	ld b,a
+screenok:
+	ld a,(LINLEN)
+	ld h,0
+	ld l,a
+	ld d,h
+	ld e,b
+scrlp:
+	add hl,de
+	djnz scrlp
+	ld (line),hl
+	ret
+
+
+line: dw 0
+mirror_cnt: db 0
+msxtype: db 0
 vdp_mirror: db 0
 psg_mirror: db 0
 rtc_mirror: db 0
@@ -316,8 +368,8 @@ ppi_mirror: db 0
 txt_test:
 	db 19
 txt_init:
-	db "S3527 / S1985 MSX Engine detector",CR,LF
-	db "v0.2 13-May-2021 Jurgen Kramer",CR,LF,CR,LF,CR,LF,EOL
+	db "S3527 / S1985 MSX Engine / mirror IO port detector",CR,LF
+	db "v0.4 21-May-2021 Jurgen Kramer",CR,LF,CR,LF,CR,LF,EOL
 txt_conclusion:
 	db CR,LF,"Conclusion: ",CR,LF,EOL
 txt_s3527:
@@ -326,18 +378,20 @@ txt_s1985:
         db "S1985",CR,LF,EOL
 txt_unknown:
 	db "Unknown or no engine",CR,LF,EOL
+txt_s1990:
+	db "Engine: S1990 (hard coded)",CR,LF,EOL
 txt_eng_det:
 	db "Engine detected : $"
 txt_prt:
-	db "Print ports (90-91h) mirrored : $"
+	db "Printer (90-91h) mirrored (94-95h): $"
 txt_psg:
-	db "PSG ports (a0-a3h) mirrored   : $"
+	db "PSG (a0-a3h) mirrored (a4-a7h): $"
 txt_ppi:
-	db "PPI ports (a8-abh) mirrored   : $"
+	db "PPI (a8-abh) mirrored (ac-afh): $"
 txt_vdp:
-	db "VDP ports (98-9bh) mirrored   : $"
+	db "VDP (98-9bh) mirrored (9c-9fh): $"
 txt_rtc:
-	db "RTC ports (b4-b5h) mirrored   : $"
+	db "RTC (b4-b5h) mirrored (b6-b7h): $"
 txt_no:
 	db "No",CR,LF,"$"
 txt_yes:
