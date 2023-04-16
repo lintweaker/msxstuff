@@ -11,6 +11,11 @@
 ; - Allow to run on Turbo-R
 ; v0.42
 ; - Report ports returning 255 for Printer, PSG,PPI and RTC
+; v0.43
+; - Printer Alt ports start at 094h
+; - Reenable Turbo-R check
+; - Updated RTC check
+; - Update printer check
 
 BDOS	equ 00005h
 RDSLT	equ 0000ch
@@ -30,8 +35,8 @@ EOL	equ "$"
 
 ; S3527 / S1985 functions and there normal and mirrored IO ports
 ;               normal:   mirorred: 
-; Printer port: 90-91h -> 94-95h - Not (fully) for S1985
-; VDP         : 98-9bh -> 9c-9f
+; Printer port: 90-91h, 93h -> 94-95h, 97h - Unused bits need masking
+; VDP         : 98-9bh -> 9c-9fh
 ; PSG         : a0-a3h -> a4-a7h
 ; PPI         : a8-abh -> ac-afh
 ; RTC         : b4-b5h -> b6-b7h - S1985 only
@@ -52,10 +57,10 @@ EOL	equ "$"
 
 	ld (msxtype),a
 
-;	ld de,txt_noturbor
-;	cp 3		; Not for Turbo-R
-;	jp z,unknown
-;	jp nc,unknown	; Or higher
+	ld de,txt_noturbor
+	cp 3		; Not for Turbo-R
+	jp z,unknown
+	jp nc,unknown	; Or higher
 
 	; Execute mirror checks
 
@@ -224,8 +229,12 @@ tst_printer:
 	ld a,1
 	ld (prt_mirror),a	; Port reads 0ffh
 	ret
-tst_prt:	
-	in a,(092h)	; Read mirror port
+tst_prt:
+    ld a,b
+    and 2       ; Only bit 1 is used
+    ld b,a
+	in a,(094h)	; Read mirror port
+	and 2
 	cp b
 	ret nz		; No mirror
 
@@ -235,7 +244,7 @@ tst_prt:
 
 	in a,(091h)
 	ld b,a
-	in a,(093h)
+	in a,(095h)
 	cp b
 	ret nz
 	ld a,255	; Indicate printer port mirroring
@@ -244,9 +253,13 @@ tst_prt:
 
 ; tst_rtc
 ; [SIMPLE] check for RTC I/O port mirroring
-; Probably need to replace this with real nibble read from the clock
+
 
 tst_rtc:
+    ld a,0dh        ; Mode register
+    out (0b4h),a
+    inc a
+    dec a
 	in a,(0b5h)
 	ld b,a
 	inc a
@@ -397,7 +410,7 @@ txt_test:
 	db 19
 txt_init:
 	db "S3527 / S1985 MSX Engine / mirror IO port detector",CR,LF
-	db "v0.42 21-May-2021 Jurgen Kramer",CR,LF,CR,LF,CR,LF
+	db "v0.43 16-Apr-2023 Jurgen Kramer",CR,LF,CR,LF,CR,LF
 	db "Note: ports returning 0ffh cannot be tested",CR,LF,CR,LF,EOL
 txt_conclusion:
 	db CR,LF,"Conclusion: ",CR,LF,EOL
@@ -412,7 +425,7 @@ txt_s1990:
 txt_eng_det:
 	db "Engine detected : $"
 txt_prt:
-	db "Printer (90-91h) mirrored (94-95h): $"
+	db "Printer (90-93h) mirrored (94-97h): $"
 txt_psg:
 	db "PSG (a0-a3h) mirrored (a4-a7h): $"
 txt_ppi:
